@@ -30,7 +30,7 @@ jobs:
           gradle-version: "8.7"
       - name: Prepare project
         run: |
-          pip install --quiet pillow==10.4.0
+          pip install --quiet --only-binary=:all: pillow
           python3 scripts/prepare.py "builds/${{ inputs.build_id }}.json"
       - name: Signing
         if: inputs.build_type != 'debug'

@@ -1,0 +1,83 @@
+name: AppForge Build
+run-name: appforge-${{ inputs.build_id }}
+on:
+  workflow_dispatch:
+    inputs:
+      build_id:
+        description: "AppForge build id"
+        required: true
+      build_type:
+        description: "debug | release | aab"
+        required: true
+        default: "debug"
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+      - name: Prepare project
+        run: |
+          pip install --quiet pillow==10.4.0
+          python3 scripts/prepare.py "builds/${{ inputs.build_id }}.json"
+      - name: Signing
+        if: inputs.build_type != 'debug'
+        env:
+          KS_B64: ${{ secrets.KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+          KS_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KS_KEY_PASS: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -n "$KS_B64" ]; then
+            echo "$KS_B64" | base64 -d > release.keystore
+            echo "KEYSTORE_PASSWORD=$KS_PASS" >> "$GITHUB_ENV"
+            echo "KEY_ALIAS=$KS_ALIAS" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=${KS_KEY_PASS:-$KS_PASS}" >> "$GITHUB_ENV"
+          else
+            echo "::warning::No KEYSTORE_BASE64 secret found. Signing with a temporary keystore - add your own before publishing to Google Play."
+            keytool -genkeypair -keystore release.keystore -alias appforge -keyalg RSA -keysize 2048 -validity 10000 -storepass appforge-temp -keypass appforge-temp -dname "CN=AppForge Temporary"
+            echo "KEYSTORE_PASSWORD=appforge-temp" >> "$GITHUB_ENV"
+            echo "KEY_ALIAS=appforge" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=appforge-temp" >> "$GITHUB_ENV"
+          fi
+      - name: Build
+        run: |
+          case "${{ inputs.build_type }}" in
+            debug) gradle --no-daemon assembleDebug ;;
+            aab) gradle --no-daemon bundleRelease ;;
+            *) gradle --no-daemon assembleRelease ;;
+          esac
+      - name: Collect output
+        id: out
+        run: |
+          mkdir -p dist
+          case "${{ inputs.build_type }}" in
+            debug) SRC=$(find app/build/outputs/apk/debug -name "*.apk" | head -n1); EXT=apk ;;
+            aab) SRC=$(find app/build/outputs/bundle/release -name "*.aab" | head -n1); EXT=aab ;;
+            *) SRC=$(find app/build/outputs/apk/release -name "*.apk" | head -n1); EXT=apk ;;
+          esac
+          cp "$SRC" "dist/app-${{ inputs.build_id }}.$EXT"
+          SHA=$(sha256sum dist/* | cut -d' ' -f1)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: appforge-build-${{ inputs.build_id }}
+          name: AppForge build ${{ inputs.build_id }}
+          body: "sha256:${{ steps.out.outputs.sha }}"
+          files: dist/*
+          prerelease: true

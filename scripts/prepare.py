@@ -145,6 +145,8 @@ host = urllib.parse.urlparse(cfg.get("url", "")).hostname or ""
 deep = ""
 if host and cfg.get("navigation", {}).get("deepLinks", True):
     deep = '<intent-filter android:autoVerify="true"><action android:name="android.intent.action.VIEW"/><category android:name="android.intent.category.DEFAULT"/><category android:name="android.intent.category.BROWSABLE"/><data android:scheme="https" android:host="%s"/></intent-filter>' % host
+# Custom-scheme callback (<packageName>://...) so OAuth flows opened in a secure browser tab return to this APK.
+deep += '<intent-filter><action android:name="android.intent.action.VIEW"/><category android:name="android.intent.category.DEFAULT"/><category android:name="android.intent.category.BROWSABLE"/><data android:scheme="%s"/></intent-filter>' % pkg.lower()
 m = m.replace("<!--AF_DEEPLINKS-->", deep)
 open(mpath, "w", encoding="utf-8").write(m)
 

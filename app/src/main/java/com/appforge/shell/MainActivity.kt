@@ -53,6 +53,8 @@ import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.browser.customtabs.CustomTabsIntent
+import android.os.Message
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
@@ -85,6 +87,10 @@ class MainActivity : AppCompatActivity() {
     private var geoOrigin: String? = null
     private var pendingPermission: PermissionRequest? = null
     private var customView: View? = null
+    private var authFlow = false
+    private var popup: WebView? = null
+    private var popupFrame: View? = null
+    private lateinit var rootView: FrameLayout
 
     private val fileLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
         val data = res.data
@@ -132,6 +138,7 @@ class MainActivity : AppCompatActivity() {
         applyWindow(branding, feat)
 
         val root = FrameLayout(this)
+        rootView = root
         val column = LinearLayout(this)
         column.orientation = LinearLayout.VERTICAL
         root.addView(column, FrameLayout.LayoutParams(-1, -1))
@@ -165,8 +172,8 @@ class MainActivity : AppCompatActivity() {
         if (Build.VERSION.SDK_INT >= 33 && sec("push").optBoolean("enabled")) {
             ActivityCompat.requestPermissions(this, arrayOf("android.permission.POST_NOTIFICATIONS"), 7)
         }
-        val deep = intent?.data?.toString()
-        web.loadUrl(if (deep != null && deep.startsWith("http")) deep else startUrl, headers())
+        val deep = intent?.data?.let { callbackUrl(it) }
+        web.loadUrl(deep ?: startUrl, headers())
     }
 
     override fun onResume() {
@@ -175,10 +182,30 @@ class MainActivity : AppCompatActivity() {
         if (p != null) { pendingUrl = null; web.loadUrl(p, headers()) }
     }
 
+    override fun onPause() {
+        super.onPause()
+        CookieManager.getInstance().flush()
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        val u = intent.data?.toString()
-        if (u != null && u.startsWith("http")) web.loadUrl(u, headers())
+        val u = intent.data?.let { callbackUrl(it) } ?: return
+        closePopup()
+        web.loadUrl(u, headers())
+    }
+
+    // Turns an incoming link into a page to load: https deep links load as-is; the
+    // <packageName>://path?query callback (used when OAuth ran in a secure browser tab)
+    // maps back onto the website so the provider's code/state reach the site's callback.
+    private fun callbackUrl(uri: Uri): String? {
+        val s = uri.scheme ?: return null
+        if (s == "http" || s == "https") return uri.toString()
+        if (!s.equals(packageName, true)) return null
+        val base = Uri.parse(startUrl)
+        val path = ((uri.host ?: "") + (uri.path ?: "")).let { if (it.isBlank() || it == "callback") "" else it }
+        val b = base.buildUpon().path(if (path.isBlank()) base.path else "/" + path.trimStart('/'))
+        b.encodedQuery(uri.encodedQuery).encodedFragment(uri.encodedFragment)
+        return b.build().toString()
     }
 
     private fun applyWindow(b: JSONObject, f: JSONObject) {
@@ -310,12 +337,14 @@ class MainActivity : AppCompatActivity() {
         s.mediaPlaybackRequiresUserGesture = !f.optBoolean("autoplay", false)
         s.setGeolocationEnabled(f.optBoolean("location", false))
         s.javaScriptCanOpenWindowsAutomatically = true
+        s.setSupportMultipleWindows(true)
         if (f.optBoolean("mixedContent", false)) s.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
         s.cacheMode = defaultCacheMode()
         val code = sec("code")
         val ua = code.optString("userAgent")
         val base = if (code.optString("userAgentMode") == "replace" && ua.isNotBlank()) ua else s.userAgentString + (if (ua.isNotBlank()) " " + ua else "")
-        s.userAgentString = base + " AppForge/" + BuildConfig.VERSION_NAME
+        val cleanBase = if (f.optBoolean("inAppLogin", true)) base.replace("; wv)", ")").replace(Regex("Version/\\d+\\.\\d+ "), "") else base
+        s.userAgentString = cleanBase + " AppForge/" + BuildConfig.VERSION_NAME
         CookieManager.getInstance().setAcceptCookie(true)
         CookieManager.getInstance().setAcceptThirdPartyCookies(web, f.optBoolean("thirdPartyCookies", true))
         web.isVerticalScrollBarEnabled = f.optBoolean("scrollbars", true)
@@ -330,7 +359,7 @@ class MainActivity : AppCompatActivity() {
         if (docStart && injectStart.isNotBlank()) WebViewCompat.addDocumentStartJavaScript(web, injectStart, setOf("*"))
 
         web.webViewClient = object : WebViewClient() {
-            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean = route(request.url)
+            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean = route(request.url, request.isRedirect)
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
                 if (!docStart && injectStart.isNotBlank()) view.evaluateJavascript(injectStart, null)
             }
@@ -338,6 +367,8 @@ class MainActivity : AppCompatActivity() {
                 swipe.isRefreshing = false
                 progress.visibility = View.GONE
                 if (!url.startsWith("file:")) { lastUrl = url; showingError = false }
+                if (isInternal(Uri.parse(url))) authFlow = false
+                CookieManager.getInstance().flush()
                 if (!docStart && injectStart.isNotBlank()) view.evaluateJavascript(injectStart, null)
                 if (injectEnd.isNotBlank() && !url.startsWith("file:")) view.evaluateJavascript(injectEnd, null)
                 if (sec("branding").optJSONObject("splash")?.optBoolean("hideOnLoad", true) != false) hideSplash()
@@ -364,6 +395,50 @@ class MainActivity : AppCompatActivity() {
         }
 
         web.webChromeClient = object : WebChromeClient() {
+            // window.open / target=_blank: sign-in popups (Google, Facebook, Apple JS SDKs) run in an
+            // overlay WebView that shares cookies and window.opener with the page, so postMessage-based
+            // logins complete in-app. Ordinary links opened in a new tab are routed normally.
+            override fun onCreateWindow(view: WebView, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message): Boolean {
+                val child = WebView(this@MainActivity)
+                child.settings.javaScriptEnabled = true
+                child.settings.domStorageEnabled = true
+                child.settings.javaScriptCanOpenWindowsAutomatically = true
+                child.settings.userAgentString = web.settings.userAgentString
+                CookieManager.getInstance().setAcceptThirdPartyCookies(child, true)
+                var decided = false
+                child.webViewClient = object : WebViewClient() {
+                    override fun shouldOverrideUrlLoading(v: WebView, r: WebResourceRequest): Boolean {
+                        val u = r.url
+                        if (!decided) {
+                            decided = true
+                            val authish = isAuthHost(u.host ?: "") || looksLikeAuth(u)
+                            if (!authish) {
+                                closePopup()
+                                if (!route(u, false)) web.loadUrl(u.toString(), headers())
+                                return true
+                            }
+                            if (needsSecureBrowser(u.toString())) { closePopup(); openSecure(u.toString()); return true }
+                            showPopup(child)
+                        }
+                        val s = u.scheme ?: ""
+                        if (s != "http" && s != "https") { closePopup(); return route(u, false) }
+                        return false
+                    }
+                    override fun onPageStarted(v: WebView, url: String, favicon: Bitmap?) {
+                        if (!decided && url != "about:blank") { decided = true; showPopup(child) }
+                    }
+                    override fun onPageFinished(v: WebView, url: String) { CookieManager.getInstance().flush() }
+                }
+                child.webChromeClient = object : WebChromeClient() {
+                    override fun onCloseWindow(window: WebView) { closePopup() }
+                }
+                popup?.destroy()
+                popup = child
+                (resultMsg.obj as WebView.WebViewTransport).webView = child
+                resultMsg.sendToTarget()
+                return true
+            }
+            override fun onCloseWindow(window: WebView) { closePopup() }
             override fun onProgressChanged(view: WebView, p: Int) {
                 progress.progress = p
                 progress.visibility = if (p < 100) View.VISIBLE else View.GONE
@@ -454,7 +529,65 @@ class MainActivity : AppCompatActivity() {
         return false
     }
 
-    private fun route(uri: Uri): Boolean {
+    private val authHosts = listOf(
+        "accounts.google.com", "accounts.youtube.com", "*.facebook.com", "facebook.com", "appleid.apple.com",
+        "login.microsoftonline.com", "login.live.com", "github.com", "*.github.com", "twitter.com", "x.com", "api.twitter.com",
+        "*.linkedin.com", "*.firebaseapp.com", "*.auth0.com", "*.clerk.accounts.dev", "accounts.*", "*.clerk.com",
+        "*.supabase.co", "*.okta.com", "*.amazoncognito.com", "*.zite.so", "*.zite.com", "*.fillout.com",
+        "auth.*", "login.*", "sso.*", "*.onelogin.com", "discord.com", "*.wordpress.com", "*.shopify.com"
+    )
+
+    private fun isAuthHost(host: String): Boolean = authHosts.any { glob(it, host) }
+
+    private fun looksLikeAuth(uri: Uri): Boolean {
+        val p = ((uri.path ?: "") + "?" + (uri.query ?: "")).lowercase()
+        return listOf("login", "log-in", "signin", "sign-in", "signup", "sign-up", "register", "oauth", "openid", "authorize",
+            "/auth", "sso", "saml", "forgot", "reset-password", "password/reset", "verify", "account", "logout", "callback").any { p.contains(it) }
+    }
+
+    private fun needsSecureBrowser(url: String): Boolean {
+        val arr = sec("navigation").optJSONArray("secureBrowserPatterns") ?: return false
+        for (i in 0 until arr.length()) if (glob(arr.optString(i).trim(), url)) return true
+        return false
+    }
+
+    // Secure browser tab (Chrome Custom Tab) for providers that refuse embedded WebViews. The provider
+    // redirects back to https://<site> (App Link) or <packageName>://..., which reopens this same activity.
+    private fun openSecure(url: String) {
+        try {
+            val tab = CustomTabsIntent.Builder().setShowTitle(true).setUrlBarHidingEnabled(false).build()
+            tab.launchUrl(this, Uri.parse(url))
+        } catch (e: Exception) { openExternal(url) }
+    }
+
+    private fun showPopup(child: WebView) {
+        if (popupFrame != null) return
+        val frame = FrameLayout(this)
+        frame.setBackgroundColor(Color.WHITE)
+        frame.addView(child, FrameLayout.LayoutParams(-1, -1))
+        val close = TextView(this)
+        close.text = "\u2715"
+        close.textSize = 20f
+        close.setTextColor(Color.DKGRAY)
+        close.gravity = Gravity.CENTER
+        val bg = GradientDrawable(); bg.shape = GradientDrawable.OVAL; bg.setColor(Color.argb(230, 245, 245, 245))
+        close.background = bg
+        close.elevation = dp(4).toFloat()
+        close.setOnClickListener { closePopup() }
+        frame.addView(close, FrameLayout.LayoutParams(dp(40), dp(40), Gravity.TOP or Gravity.END).apply { setMargins(0, dp(10), dp(10), 0) })
+        rootView.addView(frame, FrameLayout.LayoutParams(-1, -1))
+        popupFrame = frame
+    }
+
+    private fun closePopup() {
+        popupFrame?.let { rootView.removeView(it) }
+        popupFrame = null
+        popup?.let { it.stopLoading(); it.destroy() }
+        popup = null
+        CookieManager.getInstance().flush()
+    }
+
+    private fun route(uri: Uri, isRedirect: Boolean = false): Boolean {
         val url = uri.toString()
         val scheme = uri.scheme ?: ""
         if (scheme == "file") return false
@@ -469,11 +602,18 @@ class MainActivity : AppCompatActivity() {
             }
             return true
         }
+        if (scheme.equals(packageName, true)) { callbackUrl(uri)?.let { web.loadUrl(it, headers()) }; closePopup(); return true }
         if (scheme != "http" && scheme != "https") { openExternal(url); return true }
+        val inApp = sec("features").optBoolean("inAppLogin", true)
+        if (inApp && needsSecureBrowser(url)) { openSecure(url); return true }
         val ext = sec("navigation").optJSONArray("externalPatterns")
         if (ext != null) for (i in 0 until ext.length()) if (glob(ext.optString(i).trim(), url)) { openExternal(url); return true }
         if (url.contains("play.google.com/store") || uri.host == "wa.me" || uri.host == "api.whatsapp.com") { openExternal(url); return true }
         if (isInternal(uri)) return false
+        if (inApp && isAuthHost(uri.host ?: "")) { authFlow = true; return false }
+        // Mid sign-in, server redirects (and pages of the provider/SSO chain) stay in the WebView so the
+        // session cookies set along the way land in the app instead of a separate browser.
+        if (inApp && (authFlow || isRedirect) && (authFlow || looksLikeAuth(uri))) return false
         openExternal(url)
         return true
     }
@@ -520,6 +660,14 @@ class MainActivity : AppCompatActivity() {
             }
         } catch (e: Exception) {
         }
+        if (cfg.optBoolean("showBranding", false)) {
+            val tag = TextView(this)
+            tag.text = "Made with AppForge"
+            tag.textSize = 12f
+            tag.setTextColor(Color.GRAY)
+            tag.gravity = Gravity.CENTER
+            box.addView(tag, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM).apply { setMargins(0, 0, 0, dp(28)) })
+        }
         root.addView(box, FrameLayout.LayoutParams(-1, -1))
         splash = box
         val min = (dur * 1000).toLong()
@@ -544,6 +692,8 @@ class MainActivity : AppCompatActivity() {
             override fun handleOnBackPressed() {
                 val cv = customView
                 if (cv != null) { (window.decorView as FrameLayout).removeView(cv); customView = null; return }
+                val pw = popup
+                if (pw != null && popupFrame != null) { if (pw.canGoBack()) pw.goBack() else closePopup(); return }
                 if (web.canGoBack() && !showingError) { web.goBack(); return }
                 when (nav.optString("backBehavior", "history")) {
                     "doubleExit" -> {

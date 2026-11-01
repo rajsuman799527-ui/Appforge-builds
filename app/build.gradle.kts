@@ -54,5 +54,6 @@ dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.swiperefreshlayout:swiperefreshlayout:1.1.0")
     implementation("androidx.webkit:webkit:1.11.0")
+    implementation("androidx.browser:browser:1.8.0")
     implementation("com.onesignal:OneSignal:5.1.17")
 }

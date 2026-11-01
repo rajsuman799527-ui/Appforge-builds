@@ -24,13 +24,15 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.7"
       - name: Prepare project
         run: |
-          pip install --quiet --only-binary=:all: pillow
+          pip install --quiet pillow==10.4.0
           python3 scripts/prepare.py "builds/${{ inputs.build_id }}.json"
       - name: Signing
         if: inputs.build_type != 'debug'

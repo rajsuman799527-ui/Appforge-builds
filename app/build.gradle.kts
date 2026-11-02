@@ -9,6 +9,9 @@ val af = Properties().apply {
     val f = rootProject.file("appforge.properties")
     if (f.exists()) f.inputStream().use { load(it) }
 }
+// One push provider per APK. Missing property (older projects) = OneSignal, exactly as before.
+val beams = af.getProperty("pushProvider", "onesignal") == "beams"
+if (beams) apply(plugin = "com.google.gms.google-services")
 
 android {
     namespace = "com.appforge.shell"
@@ -47,6 +50,7 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
+    sourceSets.getByName("main").java.srcDir(if (beams) "src/beams/java" else "src/onesignal/java")
 }
 
 dependencies {
@@ -55,5 +59,10 @@ dependencies {
     implementation("androidx.swiperefreshlayout:swiperefreshlayout:1.1.0")
     implementation("androidx.webkit:webkit:1.11.0")
     implementation("androidx.browser:browser:1.8.0")
-    implementation("com.onesignal:OneSignal:5.1.17")
+    if (beams) {
+        implementation("com.pusher:push-notifications-android:1.9.2")
+        implementation("com.google.firebase:firebase-messaging:23.4.1")
+    } else {
+        implementation("com.onesignal:OneSignal:5.1.17")
+    }
 }

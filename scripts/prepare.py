@@ -35,6 +35,30 @@ print("Preparing " + name + " (" + pkg + ")")
 with open("appforge.properties", "w") as f:
     f.write("applicationId=%s\nversionCode=%d\nversionName=%s\n" % (pkg, int(cfg.get("versionCode") or 1), cfg.get("versionName") or "1.0.0"))
 
+# ---- Push provider: exactly one per APK (OneSignal default keeps older projects unchanged) ----
+push = cfg.get("push") or {}
+provider = "beams" if (push.get("enabled") and push.get("provider") == "beams") else "onesignal"
+with open("appforge.properties", "a") as f:
+    f.write("pushProvider=%s\n" % provider)
+if provider == "beams":
+    bm = push.get("beams") or {}
+    if not re.match(r"^[0-9a-fA-F-]{36}$", bm.get("instanceId") or ""):
+        print("::error::Beams setup failed: the Pusher Beams Instance ID is missing or invalid.")
+        sys.exit(1)
+    try:
+        gs = json.loads(fetch(bm.get("googleServicesUrl") or "").decode("utf-8"))
+    except Exception as e:
+        print("::error::Beams setup failed: could not download google-services.json: " + str(e))
+        sys.exit(1)
+    pkgs = [c.get("client_info", {}).get("android_client_info", {}).get("package_name") for c in gs.get("client", [])]
+    if pkg not in pkgs:
+        print("::error::Beams setup failed: google-services.json is for " + ", ".join([x for x in pkgs if x]) + " but this app is " + pkg + ". Add an Android app with this package name in Firebase and upload the new file.")
+        sys.exit(1)
+    json.dump(gs, open("app/google-services.json", "w", encoding="utf-8"))
+    print("::notice::Pusher Beams enabled (Firebase project " + str(gs.get("project_info", {}).get("project_id")) + "). OneSignal is not included in this APK.")
+elif push.get("enabled"):
+    print("::notice::OneSignal push enabled.")
+
 os.makedirs(os.path.join(RES, "values"), exist_ok=True)
 open(os.path.join(RES, "values/strings.xml"), "w", encoding="utf-8").write('<?xml version="1.0" encoding="utf-8"?>\n<resources><string name="app_name">%s</string></resources>\n' % esc(name))
 open(os.path.join(RES, "values/colors.xml"), "w").write('<?xml version="1.0" encoding="utf-8"?>\n<resources><color name="theme">%s</color><color name="ic_launcher_background">%s</color></resources>\n' % (theme, adaptive_bg))
@@ -135,6 +159,7 @@ if f.get("camera"): perms.append("android.permission.CAMERA")
 if f.get("microphone"): perms += ["android.permission.RECORD_AUDIO", "android.permission.MODIFY_AUDIO_SETTINGS"]
 if f.get("location"): perms += ["android.permission.ACCESS_FINE_LOCATION", "android.permission.ACCESS_COARSE_LOCATION"]
 if f.get("vibration", True): perms.append("android.permission.VIBRATE")
+if provider == "beams": perms.append("android.permission.POST_NOTIFICATIONS")
 lines = ['<uses-permission android:name="%s"/>' % p for p in perms]
 if f.get("downloads", True):
     lines.append('<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28"/>')
@@ -148,6 +173,10 @@ if host and cfg.get("navigation", {}).get("deepLinks", True):
 # Custom-scheme callback (<packageName>://...) so OAuth flows opened in a secure browser tab return to this APK.
 deep += '<intent-filter><action android:name="android.intent.action.VIEW"/><category android:name="android.intent.category.DEFAULT"/><category android:name="android.intent.category.BROWSABLE"/><data android:scheme="%s"/></intent-filter>' % pkg.lower()
 m = m.replace("<!--AF_DEEPLINKS-->", deep)
+svc = ""
+if provider == "beams":
+    svc = '<service android:name=".BeamsMessagingService" android:exported="false"><intent-filter><action android:name="com.google.firebase.MESSAGING_EVENT"/></intent-filter></service>'
+m = m.replace("<!--AF_SERVICES-->", svc)
 open(mpath, "w", encoding="utf-8").write(m)
 
 # ---- Injected JS / CSS ----
@@ -163,6 +192,12 @@ hasPermission:function(p){return n.hasPermission(String(p))},
 saveFile:function(u,f){n.saveFile(String(u),String(f||''))},
 setStatusBarColor:function(c){n.setStatusBarColor(String(c))},
 getPushToken:function(){return n.getPushToken()},
+beams:{
+addInterest:function(i){return n.pushAddInterest(String(i))},
+removeInterest:function(i){return n.pushRemoveInterest(String(i))},
+getInterests:function(){try{return JSON.parse(n.pushGetInterests())}catch(e){return []}},
+setUserId:function(id){return new Promise(function(res,rej){var k='c'+Date.now()+Math.random();window.__afCb=window.__afCb||{};window.__afCb[k]=function(ok,err){delete window.__afCb[k];ok?res():rej(new Error(err||'setUserId failed'))};n.pushSetUserId(String(id),k)})},
+clearAllState:function(){n.pushClearUser()}},
 retry:function(){n.retry()}};
 try{window.dispatchEvent(new Event('appforgeready'))}catch(e){}})();"""
 

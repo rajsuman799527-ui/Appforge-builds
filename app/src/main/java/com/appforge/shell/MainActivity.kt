@@ -336,10 +336,12 @@ class MainActivity : AppCompatActivity() {
         s.domStorageEnabled = true
         s.databaseEnabled = true
         s.allowFileAccess = true
-        s.loadWithOverviewMode = true
+        val zoomOn = f.optBoolean("zoom", false)
+        s.loadWithOverviewMode = zoomOn
         s.useWideViewPort = true
-        s.setSupportZoom(f.optBoolean("zoom", false))
-        s.builtInZoomControls = f.optBoolean("zoom", false)
+        s.setSupportZoom(zoomOn)
+        s.builtInZoomControls = zoomOn
+        s.textZoom = 100
         s.displayZoomControls = false
         s.mediaPlaybackRequiresUserGesture = !f.optBoolean("autoplay", false)
         s.setGeolocationEnabled(f.optBoolean("location", false))
@@ -373,6 +375,7 @@ class MainActivity : AppCompatActivity() {
             override fun onPageFinished(view: WebView, url: String) {
                 swipe.isRefreshing = false
                 progress.visibility = View.GONE
+                if (!f.optBoolean("zoom", false)) view.evaluateJavascript("(function(){var m=document.querySelector('meta[name=viewport]');if(!m){m=document.createElement('meta');m.name='viewport';(document.head||document.documentElement).appendChild(m);}m.content='width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no';document.documentElement.style.touchAction='pan-x pan-y';})();", null)
                 if (!url.startsWith("file:")) { lastUrl = url; showingError = false }
                 if (isInternal(Uri.parse(url))) authFlow = false
                 CookieManager.getInstance().flush()

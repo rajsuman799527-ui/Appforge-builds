@@ -14,7 +14,7 @@ permissions:
   contents: write
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - name: Checkout
@@ -44,8 +44,16 @@ jobs:
           python-version: "3.12"
       - name: Prepare project
         run: |
-          pip install --quiet pillow==10.4.0
-          python3 scripts/prepare.py "builds/${{ inputs.build_id }}.json"
+          echo "::group::Build environment"
+          python3 --version; python3 -m pip --version; uname -m; . /etc/os-release && echo "$PRETTY_NAME"
+          echo "::endgroup::"
+          # Prebuilt wheel only - never compile Pillow from source on the runner.
+          if ! python3 -m pip install --quiet --only-binary=:all: pillow==10.4.0; then
+            echo "::error title=Pillow install failed::No prebuilt Pillow 10.4.0 wheel for $(python3 --version) on $(uname -m). Check the Python version in the 'Set up Python' step."
+            exit 1
+          fi
+          python3 -c "import PIL; print('Pillow', PIL.__version__)"
+          python3 scripts/prepare.py "builds/${{ inputs.build_id }}.json" || { echo "::error title=Prepare failed::scripts/prepare.py failed - see the traceback above (bad icon/splash URL, invalid config or Lottie file)."; exit 1; }
       - name: Signing
         if: inputs.build_type != 'debug'
         env:

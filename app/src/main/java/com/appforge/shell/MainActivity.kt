@@ -793,6 +793,14 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface fun pushRemoveInterest(name: String?): Boolean = if (name.isNullOrBlank()) false else Push.removeInterest(name)
         @JavascriptInterface fun pushGetInterests(): String = Push.interests()
         @JavascriptInterface fun pushClearUser() { Push.clearUser() }
+        @JavascriptInterface fun pushStatus(): String {
+            val p = getSharedPreferences("appforge_safety", MODE_PRIVATE)
+            val o = JSONObject(Push.status())
+            o.put("disabledAfterCrash", p.getBoolean("pushDisabled", false))
+            o.put("notificationsAllowed", androidx.core.app.NotificationManagerCompat.from(this@MainActivity).areNotificationsEnabled())
+            o.put("lastCrash", (p.getString("lastCrash", "") ?: "").take(600))
+            return o.toString()
+        }
         @JavascriptInterface fun pushSetUserId(userId: String?, key: String?) {
             val k = JSONObject.quote(key ?: "")
             Push.setUserId(userId ?: "") { ok, err ->

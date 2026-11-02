@@ -197,7 +197,8 @@ addInterest:function(i){return n.pushAddInterest(String(i))},
 removeInterest:function(i){return n.pushRemoveInterest(String(i))},
 getInterests:function(){try{return JSON.parse(n.pushGetInterests())}catch(e){return []}},
 setUserId:function(id){return new Promise(function(res,rej){var k='c'+Date.now()+Math.random();window.__afCb=window.__afCb||{};window.__afCb[k]=function(ok,err){delete window.__afCb[k];ok?res():rej(new Error(err||'setUserId failed'))};n.pushSetUserId(String(id),k)})},
-clearAllState:function(){n.pushClearUser()}},
+clearAllState:function(){n.pushClearUser()},
+getStatus:function(){try{return JSON.parse(n.pushStatus())}catch(e){return {active:false}}}},
 retry:function(){n.retry()}};
 try{window.dispatchEvent(new Event('appforgeready'))}catch(e){}})();"""
 

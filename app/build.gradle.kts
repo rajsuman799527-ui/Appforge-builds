@@ -60,7 +60,8 @@ dependencies {
     implementation("androidx.webkit:webkit:1.11.0")
     implementation("androidx.browser:browser:1.8.0")
     if (beams) {
-        implementation("com.pusher:push-notifications-android:1.9.2")
+        // 1.10.0+ uses FirebaseMessaging.getToken; 1.9.x calls the removed FirebaseInstanceId and crashes on launch.
+        implementation("com.pusher:push-notifications-android:1.10.0")
         implementation("com.google.firebase:firebase-messaging:23.4.1")
     } else {
         implementation("com.onesignal:OneSignal:5.1.17")

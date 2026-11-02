@@ -33,6 +33,7 @@ object Push {
         }
     }
 
+    fun status(): String = JSONObject().put("provider", "beams").put("active", active).put("authUrl", authUrl.isNotBlank()).put("interests", JSONArray(interests())).toString()
     fun token(): String = ""
     fun addInterest(name: String): Boolean = try { if (active) { PushNotifications.addDeviceInterest(name); true } else false } catch (e: Exception) { false }
     fun removeInterest(name: String): Boolean = try { if (active) { PushNotifications.removeDeviceInterest(name); true } else false } catch (e: Exception) { false }

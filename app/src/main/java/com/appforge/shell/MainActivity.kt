@@ -172,8 +172,15 @@ class MainActivity : AppCompatActivity() {
         if (Build.VERSION.SDK_INT >= 33 && sec("push").optBoolean("enabled")) {
             ActivityCompat.requestPermissions(this, arrayOf("android.permission.POST_NOTIFICATIONS"), 7)
         }
-        val deep = intent?.data?.let { callbackUrl(it) }
+        val deep = intent?.data?.let { callbackUrl(it) } ?: pushTarget(intent)
         web.loadUrl(deep ?: startUrl, headers())
+    }
+
+    // Notification taps: Beams/FCM put "target_url" from the data payload into the launch intent.
+    private fun pushTarget(i: Intent?): String? {
+        val u = i?.getStringExtra("target_url") ?: return null
+        i.removeExtra("target_url")
+        return if (u.startsWith("https://") || u.startsWith("http://")) u else null
     }
 
     override fun onResume() {
@@ -189,7 +196,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        val u = intent.data?.let { callbackUrl(it) } ?: return
+        val u = intent.data?.let { callbackUrl(it) } ?: pushTarget(intent) ?: return
         closePopup()
         web.loadUrl(u, headers())
     }
@@ -778,7 +785,17 @@ class MainActivity : AppCompatActivity() {
             if (url.isNullOrBlank()) return
             runOnUiThread { download(url, if (name.isNullOrBlank()) URLUtil.guessFileName(url, null, null) else name, null, null) }
         }
-        @JavascriptInterface fun getPushToken(): String = try { com.onesignal.OneSignal.User.pushSubscription.id } catch (e: Exception) { "" }
+        @JavascriptInterface fun getPushToken(): String = Push.token()
+        @JavascriptInterface fun pushAddInterest(name: String?): Boolean = if (name.isNullOrBlank()) false else Push.addInterest(name)
+        @JavascriptInterface fun pushRemoveInterest(name: String?): Boolean = if (name.isNullOrBlank()) false else Push.removeInterest(name)
+        @JavascriptInterface fun pushGetInterests(): String = Push.interests()
+        @JavascriptInterface fun pushClearUser() { Push.clearUser() }
+        @JavascriptInterface fun pushSetUserId(userId: String?, key: String?) {
+            val k = JSONObject.quote(key ?: "")
+            Push.setUserId(userId ?: "") { ok, err ->
+                runOnUiThread { web.evaluateJavascript("window.__afCb&&window.__afCb[" + k + "]&&window.__afCb[" + k + "](" + ok + "," + JSONObject.quote(err) + ")", null) }
+            }
+        }
         @JavascriptInterface fun retry() { runOnUiThread { this@MainActivity.retry() } }
         @JavascriptInterface fun openSaved() { runOnUiThread { showingError = false; web.settings.cacheMode = WebSettings.LOAD_CACHE_ONLY; web.loadUrl(if (lastUrl.isBlank()) startUrl else lastUrl) } }
     }

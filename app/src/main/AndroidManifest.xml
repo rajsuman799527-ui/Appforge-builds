@@ -26,5 +26,6 @@
             </intent-filter>
             <!--AF_DEEPLINKS-->
         </activity>
+        <!--AF_SERVICES-->
     </application>
 </manifest>

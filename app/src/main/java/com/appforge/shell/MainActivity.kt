@@ -79,6 +79,7 @@ class MainActivity : AppCompatActivity() {
     private var lastBack = 0L
     private var injectStart = ""
     private var injectEnd = ""
+    private var bundleFiles: JSONObject? = null
     private var splash: View? = null
     private var splashMinUntil = 0L
     private var splashFade = true
@@ -131,6 +132,7 @@ class MainActivity : AppCompatActivity() {
         cfg = try { JSONObject(asset("appforge/config.json")) } catch (e: Exception) { JSONObject() }
         injectStart = asset("appforge/inject_start.js")
         injectEnd = asset("appforge/inject_end.js")
+        loadBundle()
         startUrl = cfg.optString("url", "https://example.com")
         val branding = sec("branding")
         val nav = sec("navigation")
@@ -368,6 +370,10 @@ class MainActivity : AppCompatActivity() {
         if (docStart && injectStart.isNotBlank()) WebViewCompat.addDocumentStartJavaScript(web, injectStart, setOf("*"))
 
         web.webViewClient = object : WebViewClient() {
+            override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
+                if (bundleFiles == null || request.method != "GET") return null
+                return bundledResponse(request.url)
+            }
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean = route(request.url, request.isRedirect)
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
                 if (!docStart && injectStart.isNotBlank()) view.evaluateJavascript(injectStart, null)
@@ -494,6 +500,28 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun defaultCacheMode(): Int = if (sec("offline").optString("cacheMode") == "cache-first") WebSettings.LOAD_CACHE_ELSE_NETWORK else WebSettings.LOAD_DEFAULT
+
+    // Bundled site: the whole website was crawled at build time and packed in assets/appforge/site.
+    private fun loadBundle() {
+        if (sec("offline").optString("mode") != "bundled") return
+        bundleFiles = try { JSONObject(asset("appforge/site/manifest.json")).optJSONObject("files") } catch (e: Exception) { null }
+    }
+
+    private fun bundledResponse(uri: Uri): WebResourceResponse? {
+        val files = bundleFiles ?: return null
+        val k = uri.toString().substringBefore("#").substringAfter("://")
+        var entry = files.optJSONObject(k)
+        if (entry == null && k.contains("?")) entry = files.optJSONObject(k.substringBefore("?"))
+        if (entry == null) return null
+        return try {
+            val mime = entry.optString("m", "application/octet-stream")
+            val textual = mime.startsWith("text/") || mime.contains("javascript") || mime.contains("json") || mime.contains("xml")
+            val charset = entry.optString("c", "")
+            val enc: String? = if (textual) (if (charset.isBlank()) "utf-8" else charset) else null
+            val headers = mapOf("Access-Control-Allow-Origin" to "*", "Cache-Control" to "no-cache")
+            WebResourceResponse(mime, enc, 200, "OK", headers, assets.open("appforge/site/" + entry.getString("f")))
+        } catch (e: Exception) { null }
+    }
 
     private fun download(url: String, name: String, mime: String?, ua: String?) {
         try {

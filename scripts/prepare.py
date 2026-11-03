@@ -223,6 +223,266 @@ for s in cfg.get("code", {}).get("snippets", []):
 open(os.path.join(ASSETS, "inject_start.js"), "w", encoding="utf-8").write("\n".join(start))
 open(os.path.join(ASSETS, "inject_end.js"), "w", encoding="utf-8").write("\n".join(end))
 
+# ---- Bundled site (fully offline): crawl the website and pack it inside the APK ----
+OFF = cfg.get("offline") or {}
+if OFF.get("mode") == "bundled":
+    import hashlib, time, mimetypes
+    from concurrent.futures import ThreadPoolExecutor
+    from html.parser import HTMLParser
+    from urllib.parse import urlparse, urljoin, urldefrag
+
+    OB = OFF.get("bundled") or {}
+    if not OB.get("ownershipConfirmed"):
+        print("::error title=Ownership not confirmed::Bundled site needs the ownership confirmation in the Offline step.")
+        sys.exit(1)
+
+    def bnum(v, lo, hi, d):
+        try:
+            v = int(v)
+        except Exception:
+            v = d
+        return max(lo, min(hi, v))
+
+    B_START_RAW = (OB.get("startUrl") or cfg.get("url") or "").strip()
+    B_DIR = os.path.join(ASSETS, "site")
+    os.makedirs(B_DIR, exist_ok=True)
+    B_DEPTH = bnum(OB.get("depth"), 1, 5, 2)
+    B_PAGES = bnum(OB.get("maxPages"), 1, 500, 100)
+    B_MAX = bnum(OB.get("maxSizeMB"), 5, 150, 50) * 1024 * 1024
+    B_EXT = OB.get("includeExternalAssets", True) is not False
+    B_FILE_CAP = 30 * 1024 * 1024
+    B_DEADLINE = time.time() + 20 * 60
+    B_BLOCK = re.compile(r"(google-analytics|googletagmanager|doubleclick|facebook\.net|connect\.facebook|hotjar|clarity\.ms|segment\.com|mixpanel|sentry\.io|onesignal|adsbygoogle)", re.I)
+    B_SKIP_EXT = (".zip", ".apk", ".exe", ".dmg", ".iso", ".gz", ".rar", ".7z", ".mp4", ".mov", ".avi", ".mkv", ".tar")
+    B_UA = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36 AppForge-Builder"
+
+    def bclean(u):
+        u = urldefrag((u or "").strip())[0]
+        p = urlparse(u)
+        path = urllib.parse.quote(p.path, safe="/:@!&()*+,;=~'%") or "/"
+        query = urllib.parse.quote(p.query, safe="=&+,;:/?@!~*'()%") if p.query else ""
+        return p.scheme.lower() + "://" + p.netloc.lower() + path + ("?" + query if query else "")
+
+    def bkey(u):
+        return u.split("://", 1)[-1]
+
+    def bbare(h):
+        return h[4:] if h.startswith("www.") else h
+
+    def bhost(u):
+        return (urlparse(u).netloc or "").lower()
+
+    B_START = bclean(B_START_RAW)
+    B_HOST = bbare(bhost(B_START))
+    if not B_START.startswith("https://") or not B_HOST:
+        print("::error title=Bundled site::The start URL must be a valid https:// address.")
+        sys.exit(1)
+
+    def bsame(u):
+        return bbare(bhost(u)) == B_HOST
+
+    def bresolve(base, ref):
+        ref = (ref or "").strip()
+        if not ref or ref.lower().startswith(("data:", "#", "javascript:", "mailto:", "tel:", "about:", "blob:", "sms:", "whatsapp:")):
+            return None
+        try:
+            u = bclean(urljoin(base, ref))
+        except Exception:
+            return None
+        return u if u.startswith(("http://", "https://")) else None
+
+    class BLinks(HTMLParser):
+        SKIP_REL = ("canonical", "alternate", "dns-prefetch", "preconnect", "author", "prev", "next", "search", "shortlink")
+
+        def __init__(self):
+            HTMLParser.__init__(self, convert_charrefs=True)
+            self.pages, self.assets, self.css, self._style = [], [], [], False
+
+        def handle_starttag(self, tag, attrs):
+            a = dict(attrs)
+            if tag in ("a", "area"):
+                if a.get("href"):
+                    self.pages.append(a["href"])
+            elif tag == "link":
+                rel = (a.get("rel") or "").lower()
+                if a.get("href") and not any(r in rel for r in self.SKIP_REL):
+                    self.assets.append(a["href"])
+            elif tag in ("script", "img", "source", "audio", "video", "track", "embed", "input"):
+                for k in ("src", "poster", "data-src", "data-poster"):
+                    if a.get(k):
+                        self.assets.append(a[k])
+                for k in ("srcset", "data-srcset"):
+                    for part in (a.get(k) or "").split(","):
+                        tok = part.strip().split(" ")[0]
+                        if tok:
+                            self.assets.append(tok)
+            if a.get("style"):
+                self.css.append(a["style"])
+            if tag == "style":
+                self._style = True
+
+        def handle_endtag(self, tag):
+            if tag == "style":
+                self._style = False
+
+        def handle_data(self, data):
+            if self._style:
+                self.css.append(data)
+
+    B_CSS_URL = re.compile(r"url\(\s*['\"]?([^'\")]+?)['\"]?\s*\)", re.I)
+    B_CSS_IMP = re.compile(r"@import\s+['\"]([^'\"]+)['\"]", re.I)
+
+    def bcss_refs(text):
+        return B_CSS_URL.findall(text) + B_CSS_IMP.findall(text)
+
+    def bfetch(u):
+        try:
+            req = urllib.request.Request(u, headers={"User-Agent": B_UA, "Accept": "*/*", "Accept-Language": "en"})
+            with urllib.request.urlopen(req, timeout=25) as r:
+                final = r.geturl()
+                ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+                charset = r.headers.get_content_charset() or ""
+                data = r.read(B_FILE_CAP + 1)
+            if len(data) > B_FILE_CAP:
+                return {"url": u, "err": "file is larger than 30 MB"}
+            if not ctype or ctype == "application/octet-stream":
+                ctype = mimetypes.guess_type(urlparse(final).path)[0] or ctype or "application/octet-stream"
+            return {"url": u, "final": bclean(final), "ctype": ctype, "charset": charset, "data": data}
+        except Exception as e:
+            return {"url": u, "err": str(e)[:120]}
+
+    B_POOL = ThreadPoolExecutor(max_workers=8)
+    b_manifest, b_fallback, b_failed = {}, {}, []
+    b_st = {"total": 0, "files": 0, "pages": 0}
+
+    def bsave(res):
+        final, ctype = res["final"], res["ctype"]
+        k = bkey(final)
+        if k not in b_manifest:
+            ext = {"text/javascript": ".js", "application/javascript": ".js", "text/html": ".html", "application/json": ".json", "image/jpeg": ".jpg", "image/svg+xml": ".svg"}.get(ctype) or mimetypes.guess_extension(ctype) or os.path.splitext(urlparse(final).path)[1][:8] or ".bin"
+            name = hashlib.sha1(k.encode("utf-8")).hexdigest()[:20] + ext
+            open(os.path.join(B_DIR, name), "wb").write(res["data"])
+            entry = {"f": name, "m": ctype}
+            if res["charset"]:
+                entry["c"] = res["charset"]
+            b_manifest[k] = entry
+            b_st["total"] += len(res["data"])
+            b_st["files"] += 1
+            if b_st["total"] > B_MAX:
+                print("::error title=Bundled site is too large::The site is bigger than your limit of " + str(B_MAX // (1024 * 1024)) + " MB. Raise the limit or lower the depth/pages in the Offline step.")
+                sys.exit(1)
+        entry = b_manifest[k]
+        for u in (res["url"], final):
+            kk = bkey(u)
+            b_manifest.setdefault(kk, entry)
+            b_fallback.setdefault(kk.split("?")[0], entry)
+        return entry
+
+    def btext(res):
+        return res["data"].decode(res["charset"] or "utf-8", "ignore")
+
+    def bfetch_assets(urls):
+        pending = list(urls)
+        while pending and time.time() < B_DEADLINE:
+            batch = []
+            for u in pending:
+                if not u or bkey(u) in b_manifest or bkey(u) in b_seen_assets or B_BLOCK.search(u):
+                    continue
+                if not B_EXT and not bsame(u):
+                    continue
+                b_seen_assets.add(bkey(u))
+                batch.append(u)
+            pending = []
+            for res in B_POOL.map(bfetch, batch):
+                if "err" in res:
+                    b_failed.append(res["url"] + "  (" + res["err"] + ")")
+                    continue
+                bsave(res)
+                if res["ctype"] == "text/css":
+                    for ref in bcss_refs(btext(res)):
+                        r = bresolve(res["final"], ref)
+                        if r:
+                            pending.append(r)
+
+    b_seen_assets, b_seen_pages = set(), {bkey(B_START)}
+    level = [B_START]
+    for depth in range(B_DEPTH + 1):
+        if not level or time.time() > B_DEADLINE:
+            break
+        print("::group::Bundled site - level " + str(depth) + " (" + str(len(level)) + " pages)")
+        nxt, assets_found = [], []
+        for res in B_POOL.map(bfetch, level):
+            if "err" in res:
+                b_failed.append(res["url"] + "  (" + res["err"] + ")")
+                if res["url"] == B_START:
+                    print("::error title=Bundled site::Could not open the start page: " + res["err"])
+                    sys.exit(1)
+                continue
+            if res["ctype"] in ("text/html", "application/xhtml+xml"):
+                if not bsame(res["final"]):
+                    continue
+                bsave(res)
+                b_st["pages"] += 1
+                lp = BLinks()
+                try:
+                    lp.feed(btext(res))
+                except Exception:
+                    pass
+                for ref in lp.assets:
+                    r = bresolve(res["final"], ref)
+                    if r:
+                        assets_found.append(r)
+                for css in lp.css:
+                    for ref in bcss_refs(css):
+                        r = bresolve(res["final"], ref)
+                        if r:
+                            assets_found.append(r)
+                for ref in lp.pages:
+                    r = bresolve(res["final"], ref)
+                    if not r or not bsame(r) or r.lower().split("?")[0].endswith(B_SKIP_EXT):
+                        continue
+                    if bkey(r) in b_seen_pages or bkey(r) in b_manifest or len(b_seen_pages) >= B_PAGES:
+                        continue
+                    b_seen_pages.add(bkey(r))
+                    nxt.append(r)
+            else:
+                bsave(res)
+                if res["ctype"] == "text/css":
+                    for ref in bcss_refs(btext(res)):
+                        r = bresolve(res["final"], ref)
+                        if r:
+                            assets_found.append(r)
+        bfetch_assets(assets_found)
+        print("::endgroup::")
+        level = nxt
+
+    if b_st["pages"] == 0:
+        print("::error title=Bundled site::No pages could be saved. Check the start URL.")
+        sys.exit(1)
+
+    b_files = dict(b_manifest)
+    for k, v in b_fallback.items():
+        b_files.setdefault(k, v)
+    for k in list(b_files.keys()):
+        if "?" not in k and b_files[k].get("m") in ("text/html", "application/xhtml+xml"):
+            b_files.setdefault(k[:-1] if k.endswith("/") else k + "/", b_files[k])
+    for k in list(b_files.keys()):
+        h = k.split("/", 1)[0]
+        if bbare(h) == B_HOST:
+            b_files.setdefault(k[4:] if h.startswith("www.") else "www." + k, b_files[k])
+    json.dump({"v": 1, "host": B_HOST, "files": b_files}, open(os.path.join(B_DIR, "manifest.json"), "w", encoding="utf-8"))
+
+    print("::group::Bundled site report")
+    print("Pages saved: " + str(b_st["pages"]))
+    print("Files saved: " + str(b_st["files"]))
+    print("Total size: " + str(round(b_st["total"] / 1048576.0, 2)) + " MB")
+    print("Failed files: " + str(len(b_failed)))
+    for line in b_failed[:50]:
+        print("  - " + line)
+    print("::endgroup::")
+    print("::notice title=Bundled site::" + str(b_st["pages"]) + " pages and " + str(b_st["files"]) + " files (" + str(round(b_st["total"] / 1048576.0, 1)) + " MB) are packed inside the app, " + str(len(b_failed)) + " failed.")
+    B_POOL.shutdown()
+
 # ---- Offline page + bundled files ----
 open(os.path.join(ASSETS, "offline.html"), "w", encoding="utf-8").write(cfg.get("offlineHtml") or "<h1>Offline</h1>")
 for a in cfg.get("offline", {}).get("assets", []):

@@ -40,6 +40,7 @@ android {
             signingConfig = signingConfigs.getByName("release")
         }
     }
+    androidResources { ignoreAssetsPattern = "!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~" }
     buildFeatures { buildConfig = true }
     lint {
         checkReleaseBuilds = false
@@ -59,6 +60,7 @@ dependencies {
     implementation("androidx.swiperefreshlayout:swiperefreshlayout:1.1.0")
     implementation("androidx.webkit:webkit:1.11.0")
     implementation("androidx.browser:browser:1.8.0")
+    implementation("androidx.work:work-runtime-ktx:2.9.0")
     if (beams) {
         // 1.10.0+ uses FirebaseMessaging.getToken; 1.9.x calls the removed FirebaseInstanceId and crashes on launch.
         implementation("com.pusher:push-notifications-android:1.10.0")

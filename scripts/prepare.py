@@ -160,7 +160,23 @@ if f.get("microphone"): perms += ["android.permission.RECORD_AUDIO", "android.pe
 if f.get("location"): perms += ["android.permission.ACCESS_FINE_LOCATION", "android.permission.ACCESS_COARSE_LOCATION"]
 if f.get("vibration", True): perms.append("android.permission.VIBRATE")
 if provider == "beams": perms.append("android.permission.POST_NOTIFICATIONS")
-lines = ['<uses-permission android:name="%s"/>' % p for p in perms]
+# ---- Native bridge (window.AppBridge): permissions for the enabled features ----
+nat = cfg.get("native") or {}
+bridge_on = bool(nat.get("bridge"))
+use_usage = bridge_on and bool(nat.get("usageStats"))
+if bridge_on and nat.get("notifications", True): perms.append("android.permission.POST_NOTIFICATIONS")
+if use_usage: perms.append("android.permission.PACKAGE_USAGE_STATS")
+for raw_perm in (nat.get("customPermissions") or [])[:30]:
+    cp = str(raw_perm or "").strip()
+    if not cp:
+        continue
+    full = cp if "." in cp else "android.permission." + cp.upper()
+    if not re.match(r"^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)*$", full):
+        print("::warning::Skipped invalid permission name: " + cp)
+        continue
+    perms.append(full)
+perms = list(dict.fromkeys(perms))
+lines = ['<uses-permission android:name="%s"%s/>' % (p, ' tools:ignore="ProtectedPermissions"' if p == "android.permission.PACKAGE_USAGE_STATS" else "") for p in perms]
 if f.get("downloads", True):
     lines.append('<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28"/>')
 mpath = "app/src/main/AndroidManifest.xml"
@@ -199,6 +215,8 @@ getInterests:function(){try{return JSON.parse(n.pushGetInterests())}catch(e){ret
 setUserId:function(id){return new Promise(function(res,rej){var k='c'+Date.now()+Math.random();window.__afCb=window.__afCb||{};window.__afCb[k]=function(ok,err){delete window.__afCb[k];ok?res():rej(new Error(err||'setUserId failed'))};n.pushSetUserId(String(id),k)})},
 clearAllState:function(){n.pushClearUser()},
 getStatus:function(){try{return JSON.parse(n.pushStatus())}catch(e){return {active:false}}}},
+openSaved:function(u){n.openSaved(String(u||''))},
+cache:{clear:function(){n.cacheClear()},size:function(){return n.cacheSize()},pages:function(){try{return JSON.parse(n.savedPages())}catch(e){return []}}},
 retry:function(){n.retry()}};
 try{window.dispatchEvent(new Event('appforgeready'))}catch(e){}})();"""
 
@@ -213,6 +231,13 @@ def css_js(css):
     return "(function(){var s=document.createElement('style');s.textContent=" + json.dumps(css) + ";(document.head||document.documentElement).appendChild(s);})();"
 
 start, end = [SHIM], []
+if bridge_on:
+    try:
+        start.append(open("scripts/appbridge.js", encoding="utf-8").read())
+    except Exception as e:
+        print("::error title=AppBridge::scripts/appbridge.js is missing - reinstall the template in Settings. " + str(e))
+        sys.exit(1)
+    print("::notice title=AppBridge::window.AppBridge is enabled in this build.")
 for s in cfg.get("code", {}).get("snippets", []):
     if not s.get("enabled", True) or not (s.get("code") or "").strip():
         continue
@@ -222,6 +247,41 @@ for s in cfg.get("code", {}).get("snippets", []):
     (start if s.get("runAt") == "start" else end).append(guard(s.get("urlPattern", ""), body))
 open(os.path.join(ASSETS, "inject_start.js"), "w", encoding="utf-8").write("\n".join(start))
 open(os.path.join(ASSETS, "inject_end.js"), "w", encoding="utf-8").write("\n".join(end))
+
+# ---- Custom native code: uploaded Kotlin / Java plugins that implement AppPlugin ----
+plugin_files = ((nat.get("plugins") or {}).get("files") or []) if bridge_on else []
+if plugin_files:
+    if len(plugin_files) > 10:
+        print("::error title=Plugins::At most 10 plugin files are allowed.")
+        sys.exit(1)
+    CUSTOM_DIR = "app/src/main/java/com/appforge/shell/custom"
+    os.makedirs(CUSTOM_DIR, exist_ok=True)
+    registry, total_chars = [], 0
+    for pf in plugin_files:
+        fname = str(pf.get("name") or "")
+        code = str(pf.get("code") or "")
+        total_chars += len(code)
+        if not re.match(r"^[A-Za-z][A-Za-z0-9_]{0,60}\.(kt|java)$", fname) or not code.strip() or len(code) > 60000 or total_chars > 200000:
+            print("::error title=Plugins::Plugin file " + fname + " is invalid, empty or too large.")
+            sys.exit(1)
+        is_kt = fname.endswith(".kt")
+        pkg_m = re.search(r"^\s*package\s+([A-Za-z0-9_.]+)", code, re.M)
+        plugin_pkg = pkg_m.group(1) if pkg_m else "com.appforge.shell.custom"
+        if not pkg_m:
+            semi = "" if is_kt else ";"
+            code = "package " + plugin_pkg + semi + "\nimport com.appforge.shell.AppPlugin" + semi + "\n" + code
+        if is_kt:
+            found = re.findall(r"\b(object|class)\s+([A-Za-z_][A-Za-z0-9_]*)[^{=\n]*:[^{\n]*\bAppPlugin\b", code)
+        else:
+            found = [("class", c_) for c_ in re.findall(r"\bclass\s+([A-Za-z_][A-Za-z0-9_]*)[^{]*\bimplements\b[^{]*\bAppPlugin\b", code)]
+        for kind, cls in found:
+            registry.append(plugin_pkg + "." + cls + ("" if kind == "object" else "()"))
+        open(os.path.join(CUSTOM_DIR, fname), "w", encoding="utf-8").write(code)
+    if not registry:
+        print("::error title=Plugins::No class that implements AppPlugin was found in your plugin files.")
+        sys.exit(1)
+    open("app/src/main/java/com/appforge/shell/CustomPlugins.kt", "w", encoding="utf-8").write("package com.appforge.shell\n\nobject CustomPlugins {\n    val all: List<AppPlugin> = listOf(\n        " + ",\n        ".join(registry) + "\n    )\n}\n")
+    print("::notice title=Plugins::" + str(len(plugin_files)) + " custom plugin file(s), " + str(len(registry)) + " plugin(s) registered.")
 
 # ---- Bundled site (fully offline): crawl the website and pack it inside the APK ----
 OFF = cfg.get("offline") or {}
@@ -250,6 +310,7 @@ if OFF.get("mode") == "bundled":
     B_PAGES = bnum(OB.get("maxPages"), 1, 500, 100)
     B_MAX = bnum(OB.get("maxSizeMB"), 5, 150, 50) * 1024 * 1024
     B_EXT = OB.get("includeExternalAssets", True) is not False
+    B_RENDER = bool(OB.get("renderJs"))
     B_FILE_CAP = 30 * 1024 * 1024
     B_DEADLINE = time.time() + 20 * 60
     B_BLOCK = re.compile(r"(google-analytics|googletagmanager|doubleclick|facebook\.net|connect\.facebook|hotjar|clarity\.ms|segment\.com|mixpanel|sentry\.io|onesignal|adsbygoogle)", re.I)
@@ -342,18 +403,21 @@ if OFF.get("mode") == "bundled":
                 final = r.geturl()
                 ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
                 charset = r.headers.get_content_charset() or ""
+                etag = r.headers.get("ETag") or ""
+                lmod = r.headers.get("Last-Modified") or ""
                 data = r.read(B_FILE_CAP + 1)
             if len(data) > B_FILE_CAP:
                 return {"url": u, "err": "file is larger than 30 MB"}
             if not ctype or ctype == "application/octet-stream":
                 ctype = mimetypes.guess_type(urlparse(final).path)[0] or ctype or "application/octet-stream"
-            return {"url": u, "final": bclean(final), "ctype": ctype, "charset": charset, "data": data}
+            return {"url": u, "final": bclean(final), "ctype": ctype, "charset": charset, "data": data, "etag": etag, "lm": lmod}
         except Exception as e:
             return {"url": u, "err": str(e)[:120]}
 
     B_POOL = ThreadPoolExecutor(max_workers=8)
     b_manifest, b_fallback, b_failed = {}, {}, []
     b_st = {"total": 0, "files": 0, "pages": 0}
+    b_meta = {"start": B_START, "etag": "", "lm": ""}
 
     def bsave(res):
         final, ctype = res["final"], res["ctype"]
@@ -404,6 +468,78 @@ if OFF.get("mode") == "bundled":
                         if r:
                             pending.append(r)
 
+    b_pw = {"tried": False, "mod": None}
+
+    def bplaywright():
+        if not b_pw["tried"]:
+            b_pw["tried"] = True
+            try:
+                import subprocess
+                try:
+                    import playwright
+                except ImportError:
+                    subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", "--break-system-packages", "playwright==1.47.0"])
+                subprocess.check_call([sys.executable, "-m", "playwright", "install", "--with-deps", "chromium"])
+                from playwright.sync_api import sync_playwright
+                b_pw["mod"] = sync_playwright
+            except Exception as e:
+                print("::warning title=JavaScript rendering unavailable::" + str(e)[:150] + " - the pages are saved without JavaScript rendering.")
+        return b_pw["mod"]
+
+    def brender(urls):
+        """Open each page in a real browser: collect the links it shows and every file it loads (scripts, JSON, images, fonts)."""
+        out = {}
+        sp = bplaywright()
+        if not sp or not urls:
+            return out
+        try:
+            with sp() as pw:
+                browser = pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+                ctx = browser.new_context(user_agent=B_UA, viewport={"width": 412, "height": 915})
+                for u in urls:
+                    if time.time() > B_DEADLINE:
+                        break
+                    seen_resp = []
+                    page = ctx.new_page()
+                    page.on("response", lambda r, acc=seen_resp: acc.append(r))
+                    links = []
+                    try:
+                        page.goto(u, wait_until="networkidle", timeout=30000)
+                    except Exception:
+                        pass
+                    try:
+                        page.wait_for_timeout(800)
+                        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                        page.wait_for_timeout(500)
+                        links = page.eval_on_selector_all("a[href]", "els => els.map(e => e.href)")
+                    except Exception:
+                        pass
+                    cap = []
+                    for r in seen_resp:
+                        try:
+                            if r.request.method != "GET" or r.status != 200 or r.request.resource_type in ("document", "websocket", "eventsource", "ping"):
+                                continue
+                            ru = bclean(r.url)
+                            if not ru.startswith(("http://", "https://")) or B_BLOCK.search(ru) or bkey(ru) in b_manifest:
+                                continue
+                            if not B_EXT and not bsame(ru):
+                                continue
+                            body = r.body()
+                            if len(body) > B_FILE_CAP:
+                                continue
+                            hdr = r.headers.get("content-type") or ""
+                            ct = hdr.split(";")[0].strip().lower() or mimetypes.guess_type(urlparse(ru).path)[0] or "application/octet-stream"
+                            cm = re.search(r"charset=([A-Za-z0-9_-]+)", hdr)
+                            cap.append({"url": ru, "final": ru, "ctype": ct, "charset": cm.group(1) if cm else "", "data": body})
+                        except Exception:
+                            pass
+                    out[u] = {"links": links, "captured": cap}
+                    page.close()
+                browser.close()
+        except Exception as e:
+            print("::warning title=JavaScript rendering stopped::" + str(e)[:150])
+        return out
+
     b_seen_assets, b_seen_pages = set(), {bkey(B_START)}
     level = [B_START]
     for depth in range(B_DEPTH + 1):
@@ -411,7 +547,11 @@ if OFF.get("mode") == "bundled":
             break
         print("::group::Bundled site - level " + str(depth) + " (" + str(len(level)) + " pages)")
         nxt, assets_found = [], []
-        for res in B_POOL.map(bfetch, level):
+        level_results = list(B_POOL.map(bfetch, level))
+        rend = {}
+        if B_RENDER:
+            rend = brender([r["final"] for r in level_results if "err" not in r and r["ctype"] in ("text/html", "application/xhtml+xml") and bsame(r["final"])])
+        for res in level_results:
             if "err" in res:
                 b_failed.append(res["url"] + "  (" + res["err"] + ")")
                 if res["url"] == B_START:
@@ -423,6 +563,8 @@ if OFF.get("mode") == "bundled":
                     continue
                 bsave(res)
                 b_st["pages"] += 1
+                if res["url"] == B_START:
+                    b_meta["etag"], b_meta["lm"] = res.get("etag", ""), res.get("lm", "")
                 lp = BLinks()
                 try:
                     lp.feed(btext(res))
@@ -437,7 +579,15 @@ if OFF.get("mode") == "bundled":
                         r = bresolve(res["final"], ref)
                         if r:
                             assets_found.append(r)
-                for ref in lp.pages:
+                rr = rend.get(res["final"]) or {"links": [], "captured": []}
+                for c in rr["captured"]:
+                    bsave(c)
+                    if c["ctype"] == "text/css":
+                        for ref in bcss_refs(btext(c)):
+                            r = bresolve(c["final"], ref)
+                            if r:
+                                assets_found.append(r)
+                for ref in lp.pages + rr["links"]:
                     r = bresolve(res["final"], ref)
                     if not r or not bsame(r) or r.lower().split("?")[0].endswith(B_SKIP_EXT):
                         continue
@@ -470,7 +620,7 @@ if OFF.get("mode") == "bundled":
         h = k.split("/", 1)[0]
         if bbare(h) == B_HOST:
             b_files.setdefault(k[4:] if h.startswith("www.") else "www." + k, b_files[k])
-    json.dump({"v": 1, "host": B_HOST, "files": b_files}, open(os.path.join(B_DIR, "manifest.json"), "w", encoding="utf-8"))
+    json.dump({"v": 1, "host": B_HOST, "start": b_meta["start"], "etag": b_meta["etag"], "lm": b_meta["lm"], "files": b_files}, open(os.path.join(B_DIR, "manifest.json"), "w", encoding="utf-8"))
 
     print("::group::Bundled site report")
     print("Pages saved: " + str(b_st["pages"]))
@@ -482,6 +632,47 @@ if OFF.get("mode") == "bundled":
     print("::endgroup::")
     print("::notice title=Bundled site::" + str(b_st["pages"]) + " pages and " + str(b_st["files"]) + " files (" + str(round(b_st["total"] / 1048576.0, 1)) + " MB) are packed inside the app, " + str(len(b_failed)) + " failed.")
     B_POOL.shutdown()
+
+# ---- Own HTML (an uploaded .html or .zip is the whole app) ----
+if (cfg.get("offline") or {}).get("mode") == "html":
+    import zipfile, shutil
+    O_KIND = ((cfg.get("offline") or {}).get("own") or {}).get("kind")
+    O_SRC = sys.argv[1][:-5] + ".own"
+    O_DIR = os.path.join(ASSETS, "own")
+    os.makedirs(O_DIR, exist_ok=True)
+    if not os.path.exists(O_SRC):
+        print("::error title=Own HTML::The uploaded file did not reach the build. Upload it again in the Offline step.")
+        sys.exit(1)
+    if O_KIND == "zip":
+        with zipfile.ZipFile(O_SRC) as zf:
+            infos = [i for i in zf.infolist() if not i.is_dir() and not i.filename.startswith("__MACOSX/") and not os.path.basename(i.filename).startswith(".")]
+            if sum(i.file_size for i in infos) > 80 * 1024 * 1024:
+                print("::error title=Own HTML::The ZIP is bigger than 80 MB once unpacked.")
+                sys.exit(1)
+            names = [i.filename.replace("\\", "/") for i in infos]
+            prefix = ""
+            if "index.html" not in names:
+                tops = set(n.split("/")[0] for n in names if "/" in n)
+                if len(tops) == 1:
+                    top = list(tops)[0] + "/"
+                    if all(n.startswith(top) for n in names):
+                        prefix = top
+            for i, n in zip(infos, names):
+                rel = n[len(prefix):] if prefix and n.startswith(prefix) else n
+                parts = [p for p in rel.split("/") if p not in ("", ".")]
+                if not parts or ".." in parts:
+                    continue
+                out = os.path.join(O_DIR, *parts)
+                os.makedirs(os.path.dirname(out), exist_ok=True)
+                with zf.open(i) as s_, open(out, "wb") as d_:
+                    shutil.copyfileobj(s_, d_)
+    else:
+        shutil.copyfile(O_SRC, os.path.join(O_DIR, "index.html"))
+    if not os.path.exists(os.path.join(O_DIR, "index.html")):
+        print("::error title=Own HTML::No index.html was found. Put an index.html at the top of your ZIP.")
+        sys.exit(1)
+    o_count = sum(len(fs) for _, _, fs in os.walk(O_DIR))
+    print("::notice title=Own HTML::" + str(o_count) + " files are packed inside the app and open with no internet.")
 
 # ---- Offline page + bundled files ----
 open(os.path.join(ASSETS, "offline.html"), "w", encoding="utf-8").write(cfg.get("offlineHtml") or "<h1>Offline</h1>")

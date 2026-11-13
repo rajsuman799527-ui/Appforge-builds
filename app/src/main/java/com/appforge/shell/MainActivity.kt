@@ -83,7 +83,6 @@ class MainActivity : AppCompatActivity() {
     private var injectEnd = ""
     private var bundleFiles: JSONObject? = null
     private var bundleMeta: JSONObject? = null
-    private var ownOn = false
     private var splash: View? = null
     private var splashMinUntil = 0L
     private var splashFade = true
@@ -96,13 +95,6 @@ class MainActivity : AppCompatActivity() {
     private var popup: WebView? = null
     private var popupFrame: View? = null
     private lateinit var rootView: FrameLayout
-    private var offlineCache: OfflineCache? = null
-    private lateinit var banner: TextView
-    private var stale = false
-    private var precacheStarted = false
-    private var pre: WebView? = null
-    // True only while the top-level page belongs to the app's own site; AppBridge calls are refused otherwise.
-    @Volatile private var bridgeTrusted = false
 
     private val fileLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
         val data = res.data
@@ -143,7 +135,6 @@ class MainActivity : AppCompatActivity() {
         cfg = try { JSONObject(asset("appforge/config.json")) } catch (e: Exception) { JSONObject() }
         injectStart = asset("appforge/inject_start.js")
         injectEnd = asset("appforge/inject_end.js")
-        try { NativeScheduler.applyConfig(this, cfg) } catch (e: Throwable) { android.util.Log.e("AppForge", "Background task not started", e) }
         loadBundle()
         startUrl = cfg.optString("url", "https://example.com")
         val branding = sec("branding")
@@ -163,13 +154,6 @@ class MainActivity : AppCompatActivity() {
         progress.visibility = View.GONE
         progress.progressTintList = ColorStateList.valueOf(color(nav.optString("progressColor"), Color.BLUE))
         if (nav.optBoolean("progressBar", true)) column.addView(progress, LinearLayout.LayoutParams(-1, dp(3)))
-        banner = TextView(this)
-        banner.visibility = View.GONE
-        banner.gravity = Gravity.CENTER
-        banner.textSize = 13f
-        banner.setTextColor(Color.WHITE)
-        banner.setPadding(dp(12), dp(7), dp(12), dp(7))
-        column.addView(banner, LinearLayout.LayoutParams(-1, -2))
         swipe = SwipeRefreshLayout(this)
         web = WebView(this)
         swipe.addView(web, ViewGroup.LayoutParams(-1, -1))
@@ -292,7 +276,6 @@ class MainActivity : AppCompatActivity() {
             "external" -> openExternal(url)
             "share" -> share(sec("extras").optString("shareText"), if (url.isBlank()) startUrl else url)
             "rate" -> openExternal("market://details?id=" + packageName)
-            "clearcache" -> clearOfflineData()
             else -> web.loadUrl(url, headers())
         }
     }
@@ -376,20 +359,6 @@ class MainActivity : AppCompatActivity() {
         val base = if (code.optString("userAgentMode") == "replace" && ua.isNotBlank()) ua else s.userAgentString + (if (ua.isNotBlank()) " " + ua else "")
         val cleanBase = if (f.optBoolean("inAppLogin", true)) base.replace("; wv)", ")").replace(Regex("Version/\\d+\\.\\d+ "), "") else base
         s.userAgentString = cleanBase + " AppForge/" + BuildConfig.VERSION_NAME
-        val oc = sec("offline")
-        if (oc.optString("mode") == "cache" && oc.optBoolean("smartCache", true)) {
-            val oca = OfflineCache(
-                this,
-                oc.optInt("cacheMaxMb", 100).coerceIn(10, 2000) * 1024L * 1024L,
-                oc.optString("cacheMode") == "cache-first",
-                oc.optBoolean("saveNoStore", false),
-                stringList(oc.optJSONArray("neverCache")),
-                s.userAgentString
-            ) { online() }
-            oca.onStale = { runOnUiThread { setStale(true) } }
-            oca.onFresh = { runOnUiThread { markFresh() } }
-            offlineCache = oca
-        }
         CookieManager.getInstance().setAcceptCookie(true)
         CookieManager.getInstance().setAcceptThirdPartyCookies(web, f.optBoolean("thirdPartyCookies", true))
         web.isVerticalScrollBarEnabled = f.optBoolean("scrollbars", true)
@@ -400,34 +369,23 @@ class MainActivity : AppCompatActivity() {
             web.isHapticFeedbackEnabled = false
         }
         web.addJavascriptInterface(Bridge(), "AppForgeNative")
-        if (sec("native").optBoolean("bridge", false)) web.addJavascriptInterface(AppBridgeNative(this, cfg) { bridgeTrusted }, "AppBridgeNative")
         val docStart = WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
         if (docStart && injectStart.isNotBlank()) WebViewCompat.addDocumentStartJavaScript(web, injectStart, setOf("*"))
 
         web.webViewClient = object : WebViewClient() {
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
-                if (ownOn && request.url.host == "appassets.androidplatform.net") return ownResponse(request.url)
-                if (bundleFiles != null && request.method == "GET") return bundledResponse(request.url)
-                return offlineCache?.intercept(request, false)
+                if (bundleFiles == null || request.method != "GET") return null
+                return bundledResponse(request.url)
             }
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean = route(request.url, request.isRedirect)
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
-                bridgeTrusted = trustedForBridge(url)
                 if (!docStart && injectStart.isNotBlank()) view.evaluateJavascript(injectStart, null)
             }
             override fun onPageFinished(view: WebView, url: String) {
-                bridgeTrusted = trustedForBridge(url)
                 swipe.isRefreshing = false
                 progress.visibility = View.GONE
                 if (!f.optBoolean("zoom", false)) view.evaluateJavascript("(function(){var m=document.querySelector('meta[name=viewport]');if(!m){m=document.createElement('meta');m.name='viewport';(document.head||document.documentElement).appendChild(m);}m.content='width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no';document.documentElement.style.touchAction='pan-x pan-y';})();", null)
                 if (!url.startsWith("file:")) { lastUrl = url; showingError = false }
-                if (!url.startsWith("file:")) {
-                    offlineCache?.setTitle(url, view.title ?: "")
-                    if (!precacheStarted && online()) {
-                        precacheStarted = true
-                        Handler(Looper.getMainLooper()).postDelayed({ precache() }, 4000)
-                    }
-                }
                 if (isInternal(Uri.parse(url))) authFlow = false
                 CookieManager.getInstance().flush()
                 if (!docStart && injectStart.isNotBlank()) view.evaluateJavascript(injectStart, null)
@@ -436,7 +394,6 @@ class MainActivity : AppCompatActivity() {
             }
             override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
                 if (!request.isForMainFrame) return
-                if (offlineCache?.forceOffline == true) Toast.makeText(this@MainActivity, "This page is not saved on your phone yet", Toast.LENGTH_SHORT).show()
                 if (!online() && sec("offline").optString("mode") == "cache" && view.settings.cacheMode != WebSettings.LOAD_CACHE_ONLY) {
                     view.settings.cacheMode = WebSettings.LOAD_CACHE_ONLY
                     view.loadUrl(request.url.toString())
@@ -549,7 +506,6 @@ class MainActivity : AppCompatActivity() {
 
     // Bundled site: the whole website was crawled at build time and packed in assets/appforge/site.
     private fun loadBundle() {
-        ownOn = sec("offline").optString("mode") == "html"
         if (sec("offline").optString("mode") != "bundled") return
         try {
             val root = JSONObject(asset("appforge/site/manifest.json"))
@@ -598,50 +554,6 @@ class MainActivity : AppCompatActivity() {
             .setNegativeButton("Later", null).show()
     }
 
-    // Own HTML: the uploaded site lives in assets/appforge/own and opens from https://appassets.androidplatform.net/own/
-    private fun ownResponse(uri: Uri): WebResourceResponse? {
-        val p = uri.path ?: return null
-        if (!p.startsWith("/own")) return null
-        var rel = p.removePrefix("/own").trimStart('/')
-        if (rel.isEmpty() || rel.endsWith("/")) rel += "index.html"
-        if (rel.contains("..")) return null
-        val ext = rel.substringAfterLast('.', "").lowercase()
-        val mime = when (ext) {
-            "html", "htm" -> "text/html"
-            "css" -> "text/css"
-            "js", "mjs" -> "text/javascript"
-            "json", "map" -> "application/json"
-            "svg" -> "image/svg+xml"
-            "png" -> "image/png"
-            "jpg", "jpeg" -> "image/jpeg"
-            "gif" -> "image/gif"
-            "webp" -> "image/webp"
-            "avif" -> "image/avif"
-            "ico" -> "image/x-icon"
-            "woff" -> "font/woff"
-            "woff2" -> "font/woff2"
-            "ttf" -> "font/ttf"
-            "otf" -> "font/otf"
-            "mp3" -> "audio/mpeg"
-            "wav" -> "audio/wav"
-            "ogg" -> "audio/ogg"
-            "mp4" -> "video/mp4"
-            "webm" -> "video/webm"
-            "txt" -> "text/plain"
-            "xml" -> "application/xml"
-            "wasm" -> "application/wasm"
-            "pdf" -> "application/pdf"
-            else -> "application/octet-stream"
-        }
-        val textual = mime.startsWith("text/") || mime.contains("json") || mime.contains("xml") || mime.contains("javascript") || mime.contains("svg")
-        val headers = mapOf("Access-Control-Allow-Origin" to "*", "Cache-Control" to "no-cache")
-        return try {
-            WebResourceResponse(mime, if (textual) "utf-8" else null, 200, "OK", headers, assets.open("appforge/own/" + rel))
-        } catch (e: Exception) {
-            WebResourceResponse("text/plain", "utf-8", 404, "Not Found", headers, java.io.ByteArrayInputStream(ByteArray(0)))
-        }
-    }
-
     private fun bundledResponse(uri: Uri): WebResourceResponse? {
         val files = bundleFiles ?: return null
         val k = uri.toString().substringBefore("#").substringAfter("://")
@@ -676,8 +588,6 @@ class MainActivity : AppCompatActivity() {
     private fun showError(type: String, failed: String) {
         if (failed.isNotBlank() && !failed.startsWith("file:")) lastUrl = failed
         showingError = true
-        stale = false
-        banner.visibility = View.GONE
         swipe.isRefreshing = false
         hideSplash()
         web.loadUrl("file:///android_asset/appforge/offline.html?type=" + type)
@@ -685,7 +595,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun retry() {
         showingError = false
-        offlineCache?.forceOffline = false
         web.settings.cacheMode = defaultCacheMode()
         web.loadUrl(if (lastUrl.isBlank()) startUrl else lastUrl, headers())
     }
@@ -694,12 +603,6 @@ class MainActivity : AppCompatActivity() {
         if (pattern.isBlank()) return false
         val rx = Regex("^" + pattern.split("*").joinToString(".*") { Regex.escape(it) } + "$", RegexOption.IGNORE_CASE)
         return rx.matches(value)
-    }
-
-    private fun trustedForBridge(url: String?): Boolean {
-        if (url == null) return false
-        val u = Uri.parse(url)
-        return u.scheme == "https" && isInternal(u)
     }
 
     private fun isInternal(uri: Uri): Boolean {
@@ -896,133 +799,6 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
-    private fun stringList(a: JSONArray?): List<String> {
-        val out = ArrayList<String>()
-        if (a != null) for (i in 0 until a.length()) { val v = a.optString(i).trim(); if (v.isNotBlank()) out.add(v) }
-        return out
-    }
-
-    override fun onDestroy() {
-        pre?.destroy()
-        pre = null
-        super.onDestroy()
-    }
-
-    // ---- Offline banner (shown above a saved page) ----
-    private fun bannerOn(): Boolean = offlineCache != null && sec("offline").optBoolean("banner", true)
-
-    private fun setStale(on: Boolean) {
-        if (!on || !bannerOn()) return
-        stale = true
-        banner.text = sec("offline").optString("bannerText").ifBlank { "You're offline. Showing the saved version." }
-        banner.setBackgroundColor(Color.parseColor("#B45309"))
-        banner.setOnClickListener(null)
-        banner.visibility = View.VISIBLE
-    }
-
-    private fun markFresh() {
-        if (!stale) return
-        stale = false
-        if (!bannerOn()) return
-        banner.text = sec("offline").optString("bannerBackText").ifBlank { "Back online" }
-        banner.setBackgroundColor(Color.parseColor("#15803D"))
-        banner.setOnClickListener(null)
-        banner.visibility = View.VISIBLE
-        banner.postDelayed({ if (!stale) banner.visibility = View.GONE }, 2500)
-    }
-
-    private fun offerRefresh() {
-        if (!bannerOn()) return
-        banner.text = sec("offline").optString("bannerBackText").ifBlank { "Back online" } + " - tap to refresh"
-        banner.setBackgroundColor(Color.parseColor("#15803D"))
-        banner.setOnClickListener { retry() }
-        banner.visibility = View.VISIBLE
-    }
-
-    // ---- Saved pages ----
-    private fun openSavedPage(u: String?) {
-        val oc = offlineCache
-        var target: String = if (!u.isNullOrBlank()) u else if (lastUrl.isBlank()) startUrl else lastUrl
-        if (oc == null) {
-            showingError = false
-            web.settings.cacheMode = WebSettings.LOAD_CACHE_ONLY
-            web.loadUrl(target)
-            return
-        }
-        if (!oc.has(target)) {
-            val list = oc.savedPages()
-            if (list.length() == 0) { Toast.makeText(this, "No saved pages yet", Toast.LENGTH_SHORT).show(); return }
-            target = list.getJSONObject(0).optString("url")
-        }
-        showingError = false
-        oc.forceOffline = true
-        web.loadUrl(target)
-    }
-
-    private fun clearOfflineData() {
-        val n = offlineCache?.size() ?: 0L
-        offlineCache?.clear()
-        web.clearCache(true)
-        Toast.makeText(this, "Saved pages cleared" + (if (n > 0L) " (" + (n / 1048576L) + " MB)" else ""), Toast.LENGTH_SHORT).show()
-    }
-
-    // Downloads the pages listed in the builder in the background (a hidden WebView) so they work offline even if never opened.
-    private fun precache() {
-        val oc = sec("offline")
-        val cache = offlineCache ?: return
-        val list = stringList(oc.optJSONArray("precache"))
-        if (list.isEmpty() || !online() || pre != null) return
-        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-        if (oc.optBoolean("precacheWifiOnly", true) && cm.isActiveNetworkMetered) return
-        val prefs = getSharedPreferences("appforge_offline", MODE_PRIVATE)
-        val now = System.currentTimeMillis()
-        if (now - prefs.getLong("precache_at", 0L) < 6L * 3600L * 1000L) return
-        prefs.edit().putLong("precache_at", now).apply()
-        val queue = ArrayList<String>()
-        for (p in list) {
-            try {
-                val u = java.net.URL(java.net.URL(startUrl), p).toString()
-                if (u.startsWith("http")) queue.add(u)
-            } catch (e: Exception) { }
-        }
-        if (queue.isEmpty()) return
-        val w = WebView(this)
-        pre = w
-        w.settings.javaScriptEnabled = true
-        w.settings.domStorageEnabled = true
-        w.settings.userAgentString = web.settings.userAgentString
-        CookieManager.getInstance().setAcceptThirdPartyCookies(w, true)
-        val main = Handler(Looper.getMainLooper())
-        var index = 0
-        var token = 0
-        fun done() { if (pre === w) { w.stopLoading(); w.destroy(); pre = null } }
-        fun next() {
-            if (pre !== w) return
-            if (index >= queue.size) { done(); return }
-            val u = queue[index]
-            index += 1
-            token += 1
-            val mine = token
-            w.loadUrl(u)
-            main.postDelayed({ if (token == mine) next() }, 25000)
-        }
-        w.webViewClient = object : WebViewClient() {
-            override fun shouldInterceptRequest(v: WebView, r: WebResourceRequest): WebResourceResponse? = cache.intercept(r, true)
-            override fun onPageFinished(v: WebView, url: String) {
-                cache.setTitle(url, v.title ?: "")
-                val mine = token
-                main.postDelayed({ if (token == mine) next() }, 2500)
-            }
-            override fun onReceivedError(v: WebView, r: WebResourceRequest, e: WebResourceError) {
-                if (r.isForMainFrame) {
-                    val mine = token
-                    main.postDelayed({ if (token == mine) next() }, 300)
-                }
-            }
-        }
-        next()
-    }
-
     private fun online(): Boolean {
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         return cm.activeNetwork != null
@@ -1032,17 +808,7 @@ class MainActivity : AppCompatActivity() {
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         cm.registerDefaultNetworkCallback(object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
-                runOnUiThread {
-                    val auto = sec("offline").optBoolean("autoReload", true)
-                    if (showingError && auto) retry()
-                    else if (stale) { if (auto) retry() else offerRefresh() }
-                }
-            }
-            override fun onLost(network: Network) {
-                // Wait a moment: switching between Wi-Fi and mobile data also reports a lost network.
-                Handler(Looper.getMainLooper()).postDelayed({
-                    if (!online() && !showingError && lastUrl.isNotBlank()) setStale(true)
-                }, 1500)
+                runOnUiThread { if (showingError && sec("offline").optBoolean("autoReload", true)) retry() }
             }
         })
     }
@@ -1117,9 +883,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
         @JavascriptInterface fun retry() { runOnUiThread { this@MainActivity.retry() } }
-        @JavascriptInterface fun openSaved(url: String?) { runOnUiThread { openSavedPage(url) } }
-        @JavascriptInterface fun savedPages(): String = (offlineCache?.savedPages() ?: JSONArray()).toString()
-        @JavascriptInterface fun cacheSize(): Long = offlineCache?.size() ?: 0L
-        @JavascriptInterface fun cacheClear() { runOnUiThread { clearOfflineData() } }
+        @JavascriptInterface fun openSaved() { runOnUiThread { showingError = false; web.settings.cacheMode = WebSettings.LOAD_CACHE_ONLY; web.loadUrl(if (lastUrl.isBlank()) startUrl else lastUrl) } }
     }
 }

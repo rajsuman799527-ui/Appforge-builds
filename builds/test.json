@@ -1,0 +1,12 @@
+{
+  "name": "Test App",
+  "packageName": "com.rajsuman.testapp",
+  "url": "https://example.com",
+  "versionCode": 1,
+  "versionName": "1.0.0",
+  "branding": {
+    "themeColor": "#4352EB",
+    "splash": { "bg": "#FFFFFF", "tagline": "Welcome", "duration": 1.5, "hideOnLoad": true }
+  },
+  "offline": { "mode": "cache" }
+}

@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>__NAME__</title>
+<style>
+:root{--acc:__ACC__;--rgb:__ACC_RGB__;--on:__ONACC__;--bg:#F5F5F8;--card:#FFFFFF;--fg:#14151B;--mute:#5F6272;--line:rgba(20,21,27,.12);--err:#D6364A}
+@media (prefers-color-scheme:dark){:root{--bg:#0D0E13;--card:#171821;--fg:#F3F4F8;--mute:#9A9DAE;--line:rgba(255,255,255,.14);--err:#FF6B7D}}
+*{box-sizing:border-box;margin:0;-webkit-tap-highlight-color:transparent}
+html,body{min-height:100%}
+body{font-family:"Inter","Roboto",system-ui,-apple-system,sans-serif;color:var(--fg);background:radial-gradient(130% 55% at 50% -8%,rgba(var(--rgb),.34),transparent 64%),var(--bg);padding:calc(env(safe-area-inset-top) + 34px) 22px calc(env(safe-area-inset-bottom) + 24px);display:flex;flex-direction:column;min-height:100dvh}
+.brand{display:flex;align-items:center;gap:12px}
+.brand img{width:44px;height:44px;border-radius:13px;object-fit:contain;background:rgba(var(--rgb),.12)}
+.brand span{font-weight:700;font-size:17px;letter-spacing:-.01em}
+h1{margin-top:34px;font-size:32px;line-height:1.1;font-weight:780;letter-spacing:-.025em}
+.sub{margin-top:10px;color:var(--mute);font-size:15.5px;line-height:1.5;max-width:26em}
+form{margin-top:28px;display:flex;flex-direction:column;gap:14px}
+label{display:block;font-size:13.5px;font-weight:600;margin-bottom:7px}
+.f{position:relative}
+input{width:100%;height:56px;border-radius:16px;border:1px solid var(--line);background:var(--card);color:var(--fg);font:inherit;font-size:16px;padding:0 16px;outline:none;transition:border-color .15s,box-shadow .15s}
+input:focus{border-color:var(--acc);box-shadow:0 0 0 4px rgba(var(--rgb),.18)}
+.eye{position:absolute;right:6px;bottom:6px;height:44px;padding:0 12px;border:0;background:none;color:var(--mute);font:inherit;font-size:14px;font-weight:600;cursor:pointer}
+.msg{min-height:20px;font-size:14px;color:var(--err);line-height:1.4}
+.msg.ok{color:var(--acc)}
+.go{height:58px;border:0;border-radius:18px;font:inherit;font-size:17px;font-weight:700;color:var(--on);cursor:pointer;background:linear-gradient(145deg,rgba(var(--rgb),1),rgba(var(--rgb),.78));box-shadow:0 14px 30px -12px rgba(var(--rgb),.75);transition:transform .12s,opacity .12s}
+.go:active{transform:scale(.98)}
+.go[disabled]{opacity:.65;pointer-events:none}
+.links{margin-top:auto;padding-top:26px;display:flex;flex-direction:column;gap:6px;align-items:flex-start}
+.link{border:0;background:none;color:var(--fg);font:inherit;font-size:15px;padding:10px 0;cursor:pointer}
+.link b{color:var(--acc);font-weight:700}
+.row{display:none}.show{display:block}
+.terms{font-size:12.5px;color:var(--mute);line-height:1.5}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<div class="brand"><img src="splash.png" alt=""><span>__NAME__</span></div>
+<h1 id="h"></h1>
+<p class="sub" id="s"></p>
+<form id="f" autocomplete="on" novalidate>
+  <div class="f row" data-m="signup"><label for="n">Full name</label><input id="n" autocomplete="name" placeholder="Your name"></div>
+  <div class="f show"><label for="e">Email</label><input id="e" type="email" inputmode="email" autocomplete="email" placeholder="you@example.com"></div>
+  <div class="f row" data-m="signup login"><label for="p">Password</label><input id="p" type="password" autocomplete="current-password" placeholder="At least 8 characters"><button type="button" class="eye" id="eye">Show</button></div>
+  <div class="msg" id="msg" role="alert"></div>
+  <button class="go" id="go" type="submit"></button>
+  <p class="terms row" data-m="signup">By creating an account you agree to the app’s terms and privacy policy.</p>
+</form>
+<div class="links">
+  <button class="link" id="l1" type="button"></button>
+  <button class="link" id="l2" type="button"></button>
+</div>
+<script>
+(function(){
+var N=window.AppForgeNative,mode="login",cbs={};
+var $=function(i){return document.getElementById(i)};
+var T={
+login:{h:"Welcome back",s:"Log in to continue where you left off.",b:"Log in",path:"/login"},
+signup:{h:"Create your account",s:"It takes less than a minute.",b:"Create account",path:"/signup"},
+forgot:{h:"Reset your password",s:"Enter your email and we\u2019ll send you a reset link.",b:"Send reset link",path:"/forgot"}};
+function set(m){
+  mode=m;$("h").textContent=T[m].h;$("s").textContent=T[m].s;$("go").textContent=T[m].b;$("msg").textContent="";$("msg").className="msg";
+  document.querySelectorAll(".row").forEach(function(r){r.classList.toggle("show",r.getAttribute("data-m").split(" ").indexOf(m)>-1)});
+  $("p").autocomplete=m==="signup"?"new-password":"current-password";
+  $("l1").innerHTML=m==="login"?"New here? <b>Create an account</b>":"Already have an account? <b>Log in</b>";
+  $("l2").textContent=m==="login"?"Forgot password?":"";$("l2").style.display=m==="login"?"block":"none";
+  $("l1").onclick=function(){set(m==="login"?"signup":"login")};
+  $("l2").onclick=function(){set("forgot")};
+}
+window.__afAuth=function(k,out){var f=cbs[k];delete cbs[k];if(f){var r;try{r=JSON.parse(out)}catch(e){r={ok:false,error:"Unexpected response from the server."}}f(r)}};
+function say(t,ok){$("msg").textContent=t;$("msg").className="msg"+(ok?" ok":"")}
+$("eye").onclick=function(){var p=$("p");var h=p.type==="password";p.type=h?"text":"password";this.textContent=h?"Hide":"Show"};
+$("f").onsubmit=function(ev){
+  ev.preventDefault();
+  var name=$("n").value.trim(),email=$("e").value.trim(),pw=$("p").value;
+  if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email))return say("Enter a valid email address.");
+  if(mode!=="forgot"&&pw.length<8)return say("Password must be at least 8 characters.");
+  if(mode==="signup"&&!name)return say("Enter your name.");
+  if(!N||!N.authRequest)return say("Sign in isn\u2019t available in this build.");
+  var k="k"+Date.now(),btn=$("go"),old=btn.textContent;btn.disabled=true;btn.textContent="Please wait\u2026";say("");
+  cbs[k]=function(r){
+    btn.disabled=false;btn.textContent=old;
+    if(!r||!r.ok)return say((r&&r.error)||"Something went wrong. Try again.");
+    if(mode==="forgot"){say("Check your inbox for the reset link.",true);return}
+    if(!r.token)return say("The server didn\u2019t return a session.");
+    N.authDone(String(r.token),JSON.stringify(r.user||{email:email,name:name}));
+  };
+  N.authRequest(T[mode].path,JSON.stringify({name:name,email:email,password:pw}),k);
+};
+set("login");
+})();
+</script>
+</body>
+</html>

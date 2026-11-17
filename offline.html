@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>__NAME__</title>
+<style>
+:root{--acc:__ACC__;--rgb:__ACC_RGB__;--on:__ONACC__;--bg:#F5F5F8;--fg:#14151B;--mute:#5F6272;--line:rgba(20,21,27,.12)}
+@media (prefers-color-scheme:dark){:root{--bg:#0D0E13;--fg:#F3F4F8;--mute:#9A9DAE;--line:rgba(255,255,255,.14)}}
+*{box-sizing:border-box;margin:0;-webkit-tap-highlight-color:transparent}
+html,body{height:100%}
+body{font-family:"Inter","Roboto",system-ui,-apple-system,"Segoe UI",sans-serif;color:var(--fg);background:radial-gradient(130% 75% at 50% -5%,rgba(var(--rgb),.30),transparent 62%),var(--bg);display:flex;flex-direction:column;padding:env(safe-area-inset-top) 24px calc(env(safe-area-inset-bottom) + 22px);overflow:hidden}
+.art{flex:1;display:flex;align-items:center;justify-content:center;min-height:0;position:relative}
+.rings{position:relative;width:min(72vw,300px);aspect-ratio:1;display:grid;place-items:center}
+.rings i{position:absolute;inset:0;border-radius:50%;border:1px solid rgba(var(--rgb),.35);animation:breathe 4.8s ease-in-out infinite}
+.rings i:nth-child(2){inset:14%;border-color:rgba(var(--rgb),.5);animation-delay:.5s}
+.rings i:nth-child(3){inset:28%;background:rgba(var(--rgb),.08);border-color:rgba(var(--rgb),.7);animation-delay:1s}
+.badge{position:relative;width:108px;height:108px;border-radius:34px;display:grid;place-items:center;color:var(--on);background:linear-gradient(145deg,rgba(var(--rgb),1),rgba(var(--rgb),.72));box-shadow:0 18px 44px -10px rgba(var(--rgb),.65),inset 0 1px 0 rgba(255,255,255,.28)}
+.badge svg{width:52px;height:52px;fill:none;stroke:currentColor;stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round}
+#lot{display:none;width:min(78vw,340px);height:min(78vw,340px)}
+.has-lottie #lot{display:block}.has-lottie .rings{display:none}
+.txt{padding:4px 2px 26px}
+h1{font-size:30px;line-height:1.12;font-weight:750;letter-spacing:-.02em;max-width:14em}
+p{margin-top:12px;font-size:16px;line-height:1.5;color:var(--mute);max-width:30em}
+.status{display:flex;align-items:center;gap:9px;margin-top:18px;font-size:13.5px;color:var(--mute)}
+.status b{width:8px;height:8px;border-radius:50%;background:var(--acc);animation:blink 1.6s ease-in-out infinite}
+.btns{display:flex;flex-direction:column;gap:10px}
+button{font:inherit;border:0;cursor:pointer;height:56px;border-radius:18px;font-size:16.5px;font-weight:650;transition:transform .12s ease,opacity .12s}
+button:active{transform:scale(.97);opacity:.9}
+.pri{background:linear-gradient(145deg,rgba(var(--rgb),1),rgba(var(--rgb),.78));color:var(--on);box-shadow:0 12px 28px -10px rgba(var(--rgb),.7)}
+.sec{background:transparent;color:var(--fg);border:1px solid var(--line)}
+.sec[hidden]{display:none}
+.spin .pri{pointer-events:none;opacity:.75}
+@keyframes breathe{0%,100%{transform:scale(.96);opacity:.55}50%{transform:scale(1.03);opacity:1}}
+@keyframes blink{0%,100%{opacity:.25}50%{opacity:1}}
+@media (prefers-reduced-motion:reduce){*{animation:none!important}}
+@media (min-height:760px){h1{font-size:34px}}
+</style>
+</head>
+<body>
+<div class="art">
+  <div class="rings"><i></i><i></i><i></i><div class="badge"><svg id="ico" viewBox="0 0 24 24"></svg></div></div>
+  <div id="lot"></div>
+</div>
+<div class="txt">
+  <h1 id="t"></h1>
+  <p id="m"></p>
+  <div class="status" id="st"><b></b><span>Waiting for a connection</span></div>
+</div>
+<div class="btns">
+  <button class="pri" id="retry">Try again</button>
+  <button class="sec" id="saved" hidden>Open saved pages</button>
+</div>
+<script>
+(function(){
+var SAVED=__SAVED__;
+var type=(new URLSearchParams(location.search).get("type")||"offline");
+var I={
+offline:'<path d="M2 9a15 15 0 0 1 20 0"/><path d="M5.5 12.6a10 10 0 0 1 13 0"/><path d="M9 16.2a5 5 0 0 1 6 0"/><circle cx="12" cy="19.6" r=".8" fill="currentColor"/><path d="M4 3l16 18" opacity=".95"/>',
+timeout:'<circle cx="12" cy="13" r="8"/><path d="M12 8.5V13l3 2"/><path d="M9.5 2.8h5"/>',
+"404":'<circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/><path d="M9 9l4 4M13 9l-4 4"/>',
+"5xx":'<rect x="3" y="4" width="18" height="6.5" rx="2"/><rect x="3" y="13.5" width="18" height="6.5" rx="2"/><path d="M7 7.2h.01M7 16.7h.01"/>',
+ssl:'<rect x="4.5" y="10.5" width="15" height="10" rx="2.5"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5"/><path d="M12 14.5v2.5"/>'};
+var C={
+offline:["You\u2019re offline","Connect to Wi-Fi or mobile data. The app reloads by itself as soon as you\u2019re back online."],
+timeout:["The page took too long","Your connection looks slow or unstable. Check it, then try again."],
+"404":["Page not found","This page has moved or no longer exists. Try again, or go back to the home screen."],
+"5xx":["The website isn\u2019t responding","The problem is on the website\u2019s side, not your phone. Wait a minute, then try again."],
+ssl:["This connection isn\u2019t secure","The website\u2019s security certificate couldn\u2019t be verified, so the app blocked the page."]};
+if(!C[type])type="offline";
+document.getElementById("ico").innerHTML=I[type];
+document.getElementById("t").textContent=C[type][0];
+document.getElementById("m").textContent=C[type][1];
+var st=document.getElementById("st");
+if(type!=="offline"&&type!=="timeout")st.style.display="none";
+if(type==="timeout")st.querySelector("span").textContent="Check your connection";
+var N=window.AppForgeNative;
+function retry(){document.body.classList.add("spin");setTimeout(function(){document.body.classList.remove("spin")},1800);try{N.retry()}catch(e){try{history.back()}catch(x){}}}
+document.getElementById("retry").onclick=retry;
+if(SAVED&&(type==="offline"||type==="timeout")&&N&&N.openSaved){var s=document.getElementById("saved");s.hidden=false;s.onclick=function(){N.openSaved()}}
+window.addEventListener("online",retry);
+function add(src,ok,bad){var s=document.createElement("script");s.src=src;s.onload=ok;s.onerror=bad||function(){};document.head.appendChild(s)}
+add("lottie.min.js",function(){add("offline_anim.js",function(){
+  if(window.lottie&&window.AF_ANIM){try{lottie.loadAnimation({container:document.getElementById("lot"),renderer:"svg",loop:true,autoplay:true,animationData:window.AF_ANIM});document.body.classList.add("has-lottie")}catch(e){}}
+})});
+})();
+</script>
+</body>
+</html>

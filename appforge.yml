@@ -1,0 +1,105 @@
+name: AppForge Build
+run-name: appforge-${{ inputs.build_id }}
+on:
+  workflow_dispatch:
+    inputs:
+      build_id:
+        description: "AppForge build id"
+        required: true
+      build_type:
+        description: "debug | release | aab"
+        required: true
+        default: "debug"
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Set up Android SDK
+        run: |
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          echo "sdk.dir=$SDK" > local.properties
+          SM="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          [ -x "$SM" ] || SM="$(ls -d "$SDK"/cmdline-tools/*/bin/sdkmanager | sort -V | tail -n1)"
+          yes | "$SM" --licenses > /dev/null || true
+          "$SM" "platforms;android-34" "build-tools;34.0.0" "platform-tools" > /dev/null || echo "::warning::SDK packages will be fetched by Gradle"
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Prepare project
+        run: |
+          echo "::group::Build environment"
+          python3 --version; python3 -m pip --version; uname -m; . /etc/os-release && echo "$PRETTY_NAME"
+          echo "::endgroup::"
+          # Prebuilt wheel only - never compile Pillow from source on the runner.
+          if ! python3 -m pip install --quiet --only-binary=:all: pillow==10.4.0; then
+            echo "::error title=Pillow install failed::No prebuilt Pillow 10.4.0 wheel for $(python3 --version) on $(uname -m). Check the Python version in the 'Set up Python' step."
+            exit 1
+          fi
+          python3 -c "import PIL; print('Pillow', PIL.__version__)"
+          python3 scripts/prepare.py "builds/${{ inputs.build_id }}.json" || { echo "::error title=Prepare failed::scripts/prepare.py failed - see the traceback above (bad icon/splash URL, invalid config or Lottie file)."; exit 1; }
+      - name: Premium screens
+        run: python3 scripts/screens.py "builds/${{ inputs.build_id }}.json"
+      - name: Signing
+        if: inputs.build_type != 'debug'
+        env:
+          KS_B64: ${{ secrets.KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+          KS_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KS_KEY_PASS: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -n "$KS_B64" ]; then
+            echo "$KS_B64" | base64 -d > release.keystore
+            echo "KEYSTORE_PASSWORD=$KS_PASS" >> "$GITHUB_ENV"
+            echo "KEY_ALIAS=$KS_ALIAS" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=${KS_KEY_PASS:-$KS_PASS}" >> "$GITHUB_ENV"
+          else
+            echo "::warning::No KEYSTORE_BASE64 secret found. Signing with a temporary keystore - add your own before publishing to Google Play."
+            keytool -genkeypair -keystore release.keystore -alias appforge -keyalg RSA -keysize 2048 -validity 10000 -storepass appforge-temp -keypass appforge-temp -dname "CN=AppForge Temporary"
+            echo "KEYSTORE_PASSWORD=appforge-temp" >> "$GITHUB_ENV"
+            echo "KEY_ALIAS=appforge" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=appforge-temp" >> "$GITHUB_ENV"
+          fi
+      - name: Build
+        run: |
+          case "${{ inputs.build_type }}" in
+            debug) gradle --no-daemon assembleDebug ;;
+            aab) gradle --no-daemon bundleRelease ;;
+            *) gradle --no-daemon assembleRelease ;;
+          esac
+      - name: Collect output
+        id: out
+        run: |
+          mkdir -p dist
+          case "${{ inputs.build_type }}" in
+            debug) SRC=$(find app/build/outputs/apk/debug -name "*.apk" | head -n1); EXT=apk ;;
+            aab) SRC=$(find app/build/outputs/bundle/release -name "*.aab" | head -n1); EXT=aab ;;
+            *) SRC=$(find app/build/outputs/apk/release -name "*.apk" | head -n1); EXT=apk ;;
+          esac
+          cp "$SRC" "dist/app-${{ inputs.build_id }}.$EXT"
+          SHA=$(sha256sum dist/* | cut -d' ' -f1)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: appforge-build-${{ inputs.build_id }}
+          name: AppForge build ${{ inputs.build_id }}
+          body: "sha256:${{ steps.out.outputs.sha }}"
+          files: dist/*
+          prerelease: true

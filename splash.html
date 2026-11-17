@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<style>
+:root{--bg:__BG__;--fg:__FG__;--acc:__ACC__;--rgb:__ACC_RGB__}
+*{box-sizing:border-box;margin:0}
+html,body{height:100%;background:var(--bg);overflow:hidden}
+body{font-family:"Inter","Roboto",system-ui,-apple-system,sans-serif;color:var(--fg);display:flex;flex-direction:column;align-items:center;justify-content:center;background:radial-gradient(90% 55% at 50% 42%,rgba(var(--rgb),.22),transparent 70%),var(--bg)}
+.mark{position:relative;width:150px;height:150px;display:grid;place-items:center}
+.mark svg{position:absolute;inset:0;width:100%;height:100%;transform:rotate(-90deg)}
+.mark circle{fill:none;stroke:var(--acc);stroke-width:2;stroke-linecap:round;stroke-dasharray:440;stroke-dashoffset:440;animation:draw 1.1s cubic-bezier(.3,.7,.2,1) .15s forwards,glow 2.6s ease-in-out 1.3s infinite}
+.mark img{width:84px;height:84px;object-fit:contain;border-radius:22px;opacity:0;transform:scale(.7);animation:pop .7s cubic-bezier(.2,.9,.25,1.2) .35s forwards}
+h1{margin-top:30px;font-size:24px;font-weight:720;letter-spacing:-.015em;opacity:0;animation:rise .6s ease .75s forwards}
+p{margin-top:8px;font-size:14.5px;opacity:0;color:var(--fg);animation:rise2 .6s ease 1s forwards}
+.bar{position:absolute;left:50%;bottom:calc(env(safe-area-inset-bottom) + 56px);width:96px;height:3px;margin-left:-48px;border-radius:3px;background:rgba(var(--rgb),.18);overflow:hidden}
+.bar i{display:block;width:40%;height:100%;border-radius:3px;background:var(--acc);animation:slide 1.3s ease-in-out infinite}
+@keyframes draw{to{stroke-dashoffset:0}}
+@keyframes glow{0%,100%{opacity:1}50%{opacity:.45}}
+@keyframes pop{to{opacity:1;transform:scale(1)}}
+@keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+@keyframes rise2{from{opacity:0;transform:translateY(10px)}to{opacity:.68;transform:none}}
+@keyframes slide{0%{transform:translateX(-100%)}100%{transform:translateX(260%)}}
+@media (prefers-reduced-motion:reduce){*{animation-duration:.01s!important;animation-iteration-count:1!important}}
+</style>
+</head>
+<body>
+<div class="mark"><svg viewBox="0 0 150 150"><circle cx="75" cy="75" r="70"/></svg><img src="splash.png" alt=""></div>
+<h1>__NAME__</h1>
+__TAG__
+<div class="bar"><i></i></div>
+</body>
+</html>

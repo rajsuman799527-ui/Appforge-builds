@@ -40,6 +40,7 @@ android {
             signingConfig = signingConfigs.getByName("release")
         }
     }
+    androidResources { ignoreAssetsPattern = "!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~" }
     buildFeatures { buildConfig = true }
     lint {
         checkReleaseBuilds = false

@@ -54,8 +54,6 @@ jobs:
           fi
           python3 -c "import PIL; print('Pillow', PIL.__version__)"
           python3 scripts/prepare.py "builds/${{ inputs.build_id }}.json" || { echo "::error title=Prepare failed::scripts/prepare.py failed - see the traceback above (bad icon/splash URL, invalid config or Lottie file)."; exit 1; }
-      - name: Premium screens
-        run: python3 scripts/screens.py "builds/${{ inputs.build_id }}.json"
       - name: Signing
         if: inputs.build_type != 'debug'
         env:
